@@ -273,14 +273,16 @@ instead of `token_symbol` (more realistic for TRM Labs anyway — they work with
 
 ### Step 0.6: Scale targets (real data)
 
-| Scale    | Date Range     | Est. ETH Txns  | Est. Token Transfers | Disk   | Target HW  |
-|----------|---------------|----------------|---------------------|--------|------------|
-| Dev      | 7 days        | ~8-10M         | ~5-8M               | ~3 GB  | Any GPU    |
-| RTX 6000 | 30 days       | ~35-40M        | ~20-30M             | ~12 GB | 24GB VRAM  |
-| H100     | 180 days      | ~200M+         | ~150M+              | ~70 GB | 80GB VRAM  |
-| H100-max | 365 days      | ~400M+         | ~300M+              | ~140 GB| 80GB VRAM* |
+| Scale    | Date Range          | ETH Txns  | VRAM (est) | Disk DL | Target HW       |
+|----------|---------------------|-----------|------------|---------|-----------------|
+| dev      | 7 days (Jan 1–7)    | ~7.5M     | ~1.4 GB    | ~1 GB   | Any (testing)   |
+| rtx6000  | 100 days (Jan–Apr)  | ~110M     | ~20 GB     | ~13 GB  | RTX 6000 24GB   |
+| h100     | 365 days (full year)| ~400M     | ~70 GB     | ~48 GB  | H100 80GB       |
 
-*H100-max may require column projection (don't load all columns) to fit in 80GB.
+VRAM estimate: 182 MB per 1M rows (measured on real 2024 ETH data, 7 columns).
+Download size: ~130 MB/day parquet on disk (column-projected, Snappy compressed).
+RTX 6000 cache region: 20 GB (`gpu_buffer_init('20 GB', '15 GB')`).
+H100 cache region: 70 GB (`gpu_buffer_init('70 GB', '60 GB')`).
 
 ### Fallback: Synthetic Data (for pipeline testing only)
 

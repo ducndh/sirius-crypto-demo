@@ -18,9 +18,14 @@ import os
 import duckdb
 
 SCALES = {
-    'dev':     {'eth_txns': 1_000_000,   'token_transfers': 500_000,    'price_hours': 8_760},
-    'rtx6000': {'eth_txns': 35_000_000,  'token_transfers': 20_000_000, 'price_hours': 8_760},
-    'h100':    {'eth_txns': 200_000_000, 'token_transfers': 150_000_000, 'price_hours': 8_760},
+    # dev: pipeline testing only — fast to generate
+    'dev':     {'eth_txns': 7_500_000,   'token_transfers': 7_500_000,   'price_hours': 8_760},
+
+    # rtx6000: fills 24 GB VRAM (~110M rows × 182 MB/1M ≈ 20 GB)
+    'rtx6000': {'eth_txns': 110_000_000, 'token_transfers': 110_000_000, 'price_hours': 8_760},
+
+    # h100: fills 80 GB VRAM (~385M rows × 182 MB/1M ≈ 70 GB)
+    'h100':    {'eth_txns': 385_000_000, 'token_transfers': 385_000_000, 'price_hours': 8_760},
 }
 
 

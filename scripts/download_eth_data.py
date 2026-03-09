@@ -32,10 +32,16 @@ S3_HTTPS_BASE = "https://aws-public-blockchain.s3.us-east-2.amazonaws.com"
 S3_NS = "http://s3.amazonaws.com/doc/2006-03-01/"
 
 SCALES = {
-    "dev":      ("2024-01-01", "2024-01-07"),   # 7 days
-    "rtx6000":  ("2024-01-01", "2024-01-31"),   # 30 days
-    "h100":     ("2024-01-01", "2024-06-30"),   # 180 days
-    "h100-max": ("2024-01-01", "2024-12-31"),   # 365 days
+    # dev: pipeline testing only — fast download, proves queries work
+    "dev":      ("2024-01-01", "2024-01-07"),   # 7 days,  ~7.5M rows,  ~1.4 GB VRAM
+
+    # rtx6000: fills 24 GB VRAM (20 GB cache region)
+    # ~1.1M rows/day × 100 days × 182 MB/1M rows ≈ 18-20 GB
+    "rtx6000":  ("2024-01-01", "2024-04-10"),   # 100 days, ~110M rows, ~20 GB VRAM
+
+    # h100: fills 80 GB VRAM (70 GB cache region)
+    # ~1.1M rows/day × 350 days × 182 MB/1M rows ≈ 70 GB
+    "h100":     ("2023-01-01", "2023-12-31"),   # 365 days, ~400M rows, ~70 GB VRAM
 }
 
 # Columns we actually use — column projection avoids downloading unneeded data
