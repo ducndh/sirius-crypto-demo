@@ -1,0 +1,9 @@
+data/raw/
+data/*.parquet
+data/*.duckdb
+results/
+slides/*.html
+slides/*.pdf
+__pycache__/
+*.pyc
+.env
