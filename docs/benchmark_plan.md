@@ -795,9 +795,8 @@ sirius-crypto-demo/
 │   ├── q09_address_pairs.sql
 │   └── q10_block_stats.sql
 ├── scripts/
-│   ├── download_eth_data.sh       # Download real data from AWS S3
+│   ├── download_eth_data.py       # Download from AWS S3 (no account/CLI needed)
 │   ├── download_prices.py         # Download price data from CoinGecko
-│   ├── prepare_demo_data.py       # Consolidate raw → demo-ready parquet
 │   ├── generate_synthetic_data.py # FALLBACK ONLY: synthetic data for pipeline testing
 │   ├── run_demo_benchmark.py      # Automated benchmark runner
 │   ├── run_live_demo.sh           # Interactive demo launcher
@@ -819,49 +818,35 @@ until the check passes.
 
 ### Step 1: Download real Ethereum data
 ```bash
-cd /home/cc/sirius-asof
+cd /home/cc/sirius-crypto-demo
 
-# Install AWS CLI if needed
-pip install awscli  # or: sudo apt install awscli
-
-# Download 7 days of real ETH transactions (~8-10M rows, ~3GB)
-bash scripts/download_eth_data.sh dev
+# No AWS account needed — public bucket, DuckDB reads S3 directly
+# 7 days ≈ 8-10M transactions, ~2GB download
+python scripts/download_eth_data.py --scale dev
 ```
-**Check**: `du -sh data/raw/eth_transactions/` shows ~2-3 GB of parquet files.
-`duckdb -c "SELECT COUNT(*) FROM 'data/raw/eth_transactions/**/*.parquet'"` returns millions of rows.
-
-**If AWS download fails or is too slow**: Fall back to synthetic data:
+**Check**: Script prints row count and date range on completion.
 ```bash
-python scripts/generate_synthetic_data.py --scale dev
+~/.pixi/bin/pixi run -e cuda12 python -c "
+import duckdb; con = duckdb.connect()
+print(con.execute(\"SELECT COUNT(*), MIN(block_timestamp)::DATE, MAX(block_timestamp)::DATE FROM 'data/eth_transactions.parquet'\").fetchone())
+"
+```
+
+**If S3 download fails**: Fall back to synthetic data (pipeline testing only — not for demos):
+```bash
+~/.pixi/bin/pixi run -e cuda12 python scripts/generate_synthetic_data.py --scale dev
 ```
 
 ### Step 2: Download price data
 ```bash
-python scripts/download_prices.py
+~/.pixi/bin/pixi run -e cuda12 python scripts/download_prices.py
 ```
-**Check**: `duckdb -c "SELECT COUNT(*), MIN(ts), MAX(ts) FROM 'data/prices.parquet'"` shows
-thousands of rows covering the same date range as the transaction data.
+**Check**: Script prints row count, date range, and symbols on completion.
 
-**If CoinGecko API is down**: Manually download CSV from https://www.cryptodatadownload.com/
-and convert to parquet.
+**If CoinGecko API fails** (rate limit or down): re-run after 60 seconds.
+Free tier allows ~10 calls/min; the script fetches 8 coins with 6s sleep between each.
 
-### Step 3: Prepare consolidated parquet files
-```bash
-python scripts/prepare_demo_data.py
-```
-**Check**: `ls -la data/eth_transactions.parquet data/token_transfers.parquet data/prices.parquet`
-shows 3 files. Run:
-```bash
-duckdb -c "
-  SELECT 'eth_transactions' AS t, COUNT(*) AS rows FROM 'data/eth_transactions.parquet'
-  UNION ALL
-  SELECT 'token_transfers', COUNT(*) FROM 'data/token_transfers.parquet'
-  UNION ALL
-  SELECT 'prices', COUNT(*) FROM 'data/prices.parquet';
-"
-```
-
-### Step 4: Find a real address for Q02 and update the query
+### Step 3: Find a real address for Q02 and update the query
 ```bash
 duckdb -c "
   SELECT from_address, COUNT(*) AS cnt
@@ -907,8 +892,7 @@ actually executing, not falling back to CPU).
 ### Step 9: Scale up to RTX 6000
 ```bash
 # Download 30 days of real data (~35-40M transactions)
-bash scripts/download_eth_data.sh rtx6000
-python scripts/prepare_demo_data.py
+~/.pixi/bin/pixi run -e cuda12 python scripts/download_eth_data.py --scale rtx6000
 python scripts/run_demo_benchmark.py
 ```
 **Check**: Results table shows meaningful speedups (expect 5-30x on 30M+ rows).

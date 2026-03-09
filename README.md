@@ -16,16 +16,13 @@ for USD price matching, and heavy GROUP BY aggregation.
 sudo apt install awscli       # or: pip install awscli
 pip install duckdb requests   # or use the pixi env from sirius-asof
 
-# 2. Download real Ethereum data (7 days, ~3GB, no account needed)
-bash scripts/download_eth_data.sh dev
+# 2. Download real Ethereum data (7 days, ~8-10M rows, no account needed)
+python scripts/download_eth_data.py --scale dev
 
 # 3. Download price data
 python scripts/download_prices.py
 
-# 4. Consolidate into demo-ready parquet
-python scripts/prepare_demo_data.py
-
-# 5. Validate queries (CPU only first)
+# 4. Validate queries (CPU only first)
 python scripts/validate_queries.py --mode cpu-only
 
 # 6. Full benchmark (CPU vs GPU)
