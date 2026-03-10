@@ -166,8 +166,10 @@ def main():
     result = download_table(
         con,
         table_type="transactions",
-        select_cols="hash, block_timestamp, from_address, to_address, value, gas_price, block_number",
-        rename_map={"hash": "tx_hash"},
+        # Exclude hash (tx_hash): 64-char string × 100M rows = ~8 GB VRAM wasted.
+        # None of the demo queries use it. Saves ~35% of GPU memory.
+        select_cols="block_timestamp, from_address, to_address, value, gas_price, block_number",
+        rename_map={},
         out_path=eth_out,
         start=start, end=end,
     )

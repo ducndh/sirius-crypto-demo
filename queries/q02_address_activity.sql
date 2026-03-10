@@ -17,4 +17,5 @@ SELECT
     MAX(block_timestamp)          AS last_seen,
     COUNT(DISTINCT to_address)    AS unique_recipients
 FROM eth_transactions
-WHERE from_address = '0x__REPLACE_WITH_REAL_ADDRESS__';
+-- Top sender in 2024-Q1: 0x75e89d5979e4f6fba9f97c104c2f0afb3f1dcb88 (1.4M txns, likely Binance)
+WHERE from_address = '0x75e89d5979e4f6fba9f97c104c2f0afb3f1dcb88';

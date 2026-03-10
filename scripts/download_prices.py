@@ -1,115 +1,117 @@
 #!/usr/bin/env python3
-"""Download historical crypto price data from CoinGecko (free tier).
+"""Download historical ETH/USD price data for the ASOF JOIN demo queries.
 
-Fetches hourly ETH/USD prices (and optionally other coins) and writes
-a parquet file at data/prices.parquet with schema:
+Primary source: CryptoDataDownload (free, direct CSV, full historical depth)
+  - Binance ETHUSDT hourly OHLCV
+  - No account, no API key, single curl-style download
+  - Covers all years back to 2017
+
+Fallback: CoinGecko API (free tier, last 365 days only — NOT suitable for historical data)
+
+Output: data/prices.parquet with schema:
   ts TIMESTAMP, symbol VARCHAR, price_usd DOUBLE
 
 Usage:
-  python scripts/download_prices.py [--data-dir data] [--days 365]
+  python scripts/download_prices.py --start 2024-01-01 --end 2024-04-11
+  python scripts/download_prices.py  # auto-detects range from eth_transactions.parquet
 """
 import argparse
 import os
-import time
-import json
 import urllib.request
-import urllib.parse
 import duckdb
 
 
-# CoinGecko coin IDs → symbol names
-COINS = {
-    'ethereum': 'ETH',
-    'bitcoin': 'BTC',
-    'tether': 'USDT',
-    'usd-coin': 'USDC',
-    'dai': 'DAI',
-    'chainlink': 'LINK',
-    'uniswap': 'UNI',
-    'wrapped-bitcoin': 'WBTC',
-}
+CDD_URL = "https://www.cryptodatadownload.com/cdd/Binance_ETHUSDT_1h.csv"
 
 
-def fetch_coin_prices(coin_id: str, days: int) -> list[dict]:
-    """Fetch hourly price history from CoinGecko free API."""
-    params = urllib.parse.urlencode({
-        'vs_currency': 'usd',
-        'days': str(days),
-    })
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?{params}"
-    req = urllib.request.Request(url, headers={'User-Agent': 'sirius-crypto-demo/1.0'})
+def detect_tx_range(data_dir: str) -> tuple[str, str]:
+    """Read date range from existing eth_transactions.parquet."""
+    path = os.path.join(data_dir, "eth_transactions.parquet")
+    if not os.path.exists(path):
+        return "2024-01-01", "2024-12-31"
+    con = duckdb.connect()
+    row = con.execute(
+        f"SELECT MIN(block_timestamp)::DATE::VARCHAR, MAX(block_timestamp)::DATE::VARCHAR "
+        f"FROM '{path}'"
+    ).fetchone()
+    return row[0], row[1]
 
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read())
 
-    # data['prices'] = [[timestamp_ms, price], ...]
-    return [
-        {'ts_ms': int(ts_ms), 'symbol': COINS[coin_id], 'price_usd': float(price)}
-        for ts_ms, price in data['prices']
-    ]
+def download_cdd(tmp_path: str):
+    """Download the CryptoDataDownload ETH/USDT hourly CSV."""
+    print(f"Downloading from CryptoDataDownload...", end=" ", flush=True)
+    req = urllib.request.Request(
+        CDD_URL, headers={"User-Agent": "sirius-crypto-demo/1.0"}
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = resp.read()
+    with open(tmp_path, "wb") as f:
+        f.write(data)
+    print(f"{len(data)/1e6:.1f} MB")
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--data-dir', default='data')
-    p.add_argument('--days', type=int, default=365,
-                   help='Days of history (free tier max: 365)')
-    p.add_argument('--coins', nargs='+', default=list(COINS.keys()),
-                   help='CoinGecko coin IDs to fetch')
+    p.add_argument("--data-dir", default="data")
+    p.add_argument("--start", default=None,
+                   help="Start date (default: auto-detect from eth_transactions.parquet)")
+    p.add_argument("--end", default=None,
+                   help="End date (default: auto-detect from eth_transactions.parquet)")
     args = p.parse_args()
 
     os.makedirs(args.data_dir, exist_ok=True)
-    out_path = os.path.join(args.data_dir, 'prices.parquet')
+    out_path = os.path.join(args.data_dir, "prices.parquet")
+    tmp_csv = os.path.join(args.data_dir, "_prices_raw.csv")
 
-    all_rows = []
-    for coin_id in args.coins:
-        if coin_id not in COINS:
-            print(f"WARNING: Unknown coin ID '{coin_id}', skipping")
-            continue
-        symbol = COINS[coin_id]
-        print(f"Fetching {symbol} ({coin_id})...", end=' ', flush=True)
-        try:
-            rows = fetch_coin_prices(coin_id, args.days)
-            all_rows.extend(rows)
-            print(f"{len(rows):,} rows")
-        except Exception as e:
-            print(f"ERROR: {e}")
-            print(f"  Skipping {symbol}. Try again later or use CryptoDataDownload CSV.")
+    # Auto-detect date range from transactions if not specified
+    start, end = args.start, args.end
+    if not start or not end:
+        detected_start, detected_end = detect_tx_range(args.data_dir)
+        start = start or detected_start
+        # Add 1 day buffer on end to ensure full coverage
+        from datetime import date, timedelta
+        end_date = date.fromisoformat(end or detected_end) + timedelta(days=1)
+        end = end_date.isoformat()
+        print(f"Auto-detected range from eth_transactions.parquet: {start} → {end}")
 
-        # Free tier: ~10-15 calls/min → sleep 6s between coins
-        if coin_id != args.coins[-1]:
-            time.sleep(6)
+    try:
+        download_cdd(tmp_csv)
+        con = duckdb.connect()
 
-    if not all_rows:
-        print("No price data fetched. Exiting.")
-        return
+        # CDD CSV has a URL as first line, then header, then data
+        # Columns: Unix (epoch_ms), Date, Symbol, Open, High, Low, Close, Volume ETH, Volume USDT, tradecount
+        con.execute(f"""
+            COPY (
+                SELECT
+                    epoch_ms(Unix) AS ts,
+                    'ETH'          AS symbol,
+                    Close          AS price_usd
+                FROM read_csv('{tmp_csv}',
+                    skip=1,
+                    header=true,
+                    columns={{
+                        'Unix': 'BIGINT', 'Date': 'VARCHAR', 'Symbol': 'VARCHAR',
+                        'Open': 'DOUBLE', 'High': 'DOUBLE', 'Low': 'DOUBLE',
+                        'Close': 'DOUBLE', 'Volume ETH': 'DOUBLE',
+                        'Volume USDT': 'DOUBLE', 'tradecount': 'BIGINT'
+                    }}
+                )
+                WHERE epoch_ms(Unix) BETWEEN '{start}' AND '{end}'
+                ORDER BY ts
+            ) TO '{out_path}' (FORMAT PARQUET)
+        """)
 
-    print(f"\nWriting {len(all_rows):,} total price rows to {out_path}...")
-    con = duckdb.connect()
-    con.execute("CREATE TABLE _prices AS SELECT * FROM all_rows")
-    con.execute(f"""
-        COPY (
-            SELECT
-                epoch_ms(ts_ms) AS ts,
-                symbol,
-                price_usd
-            FROM _prices
-            ORDER BY symbol, ts
-        ) TO '{out_path}' (FORMAT PARQUET)
-    """)
+        count, min_ts, max_ts = con.execute(
+            f"SELECT COUNT(*), MIN(ts)::DATE, MAX(ts)::DATE FROM '{out_path}'"
+        ).fetchone()
+        print(f"  {count:,} hourly ETH/USD prices: {min_ts} → {max_ts}")
 
-    # Verify
-    count = con.execute(f"SELECT COUNT(*) FROM '{out_path}'").fetchone()[0]
-    min_ts, max_ts = con.execute(
-        f"SELECT MIN(ts)::DATE, MAX(ts)::DATE FROM '{out_path}'"
-    ).fetchone()
-    symbols = [r[0] for r in con.execute(
-        f"SELECT DISTINCT symbol FROM '{out_path}' ORDER BY 1"
-    ).fetchall()]
-    print(f"  {count:,} rows, {min_ts} → {max_ts}")
-    print(f"  Symbols: {', '.join(symbols)}")
-    print(f"\nNext step: python scripts/prepare_demo_data.py")
+    finally:
+        if os.path.exists(tmp_csv):
+            os.unlink(tmp_csv)
+
+    print(f"\nNext step: python scripts/validate_queries.py --mode cpu-only")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -97,14 +97,21 @@ def run_gpu(sql: str, data_dir: str, gpu_cache: str, gpu_proc: str) -> tuple[int
 
     output = result.stdout + result.stderr
 
-    # Parse timer output: "Run Time (s): real X.XXX ..."
-    timer_match = re.search(r'Run Time.*?real\s+([\d.]+)', output)
-    elapsed_ms = float(timer_match.group(1)) * 1000 if timer_match else None
+    # Parse timer: use LAST Run Time line (belongs to the timed query, not warmup)
+    timer_matches = re.findall(r'Run Time.*?real\s+([\d.]+)', output)
+    elapsed_ms = float(timer_matches[-1]) * 1000 if timer_matches else None
 
-    # Parse row count from DuckDB output lines like "X rows" or "(X rows)"
-    rows_matches = re.findall(r'(\d+)\s+rows?', output)
-    # Take the last match (most likely to be from our query, not warmup)
-    row_count = int(rows_matches[-1]) if rows_matches else None
+    # Row count: search only AFTER the last ".timer on" marker to avoid
+    # picking up "0 rows" from gpu_buffer_init or warmup query counts.
+    timer_on_pos = output.rfind('.timer on')
+    after_timer = output[timer_on_pos:] if timer_on_pos >= 0 else output
+    rows_matches = re.findall(r'(\d+)\s+rows?', after_timer)
+    if rows_matches:
+        row_count = int(rows_matches[-1])
+    elif '└' in after_timer or ('Run Time' in after_timer and '│' in after_timer):
+        row_count = 1  # single-row result (DuckDB omits "X rows" for 1-row tables)
+    else:
+        row_count = None
 
     return row_count, elapsed_ms, output
 
@@ -122,10 +129,7 @@ def main():
                    help='Print full GPU output on failure')
     args = p.parse_args()
 
-    global SIRIUS_BIN
-    SIRIUS_BIN = args.sirius_binary
-
-    if not os.path.exists(SIRIUS_BIN) and args.mode != 'cpu-only':
+    if not os.path.exists(args.sirius_binary) and args.mode != 'cpu-only':
         print(f"ERROR: Sirius binary not found: {SIRIUS_BIN}")
         print(f"Build with: cd /home/cc/sirius-asof && ~/.pixi/bin/pixi run -e cuda12 make release")
         print(f"Or set SIRIUS_BIN env var.")
