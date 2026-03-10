@@ -49,12 +49,13 @@ _cpu_con = None
 def get_cpu_con(data_dir: str) -> duckdb.DuckDBPyConnection:
     global _cpu_con
     if _cpu_con is None:
-        _cpu_con = duckdb.connect()
-        _cpu_con.execute(f"SET threads = {os.cpu_count()}")
+        con = duckdb.connect()
+        con.execute(f"SET threads = {os.cpu_count()}")
         for table in ['eth_transactions', 'token_transfers', 'prices']:
             path = os.path.join(data_dir, f'{table}.parquet')
             if os.path.exists(path):
-                _cpu_con.execute(f"CREATE TABLE {table} AS SELECT * FROM '{path}'")
+                con.execute(f"CREATE TABLE {table} AS SELECT * FROM '{path}'")
+        _cpu_con = con  # only cache after successful setup
     return _cpu_con
 
 
