@@ -50,7 +50,7 @@ def get_cpu_con(data_dir: str) -> duckdb.DuckDBPyConnection:
     global _cpu_con
     if _cpu_con is None:
         _cpu_con = duckdb.connect()
-        _cpu_con.execute("SET threads = TO_INTEGER(current_setting('threads'))")
+        _cpu_con.execute(f"SET threads = {os.cpu_count()}")
         for table in ['eth_transactions', 'token_transfers', 'prices']:
             path = os.path.join(data_dir, f'{table}.parquet')
             if os.path.exists(path):
@@ -84,7 +84,7 @@ def gpu_init_script(data_dir: str, gpu_cache: str, gpu_proc: str) -> str:
 
 
 def run_gpu_query(sql: str, data_dir: str, gpu_cache: str, gpu_proc: str,
-                  n_runs: int) -> tuple[list[float], int | None]:
+                  n_runs: int, sirius_bin: str = SIRIUS_BIN) -> tuple[list[float], int | None]:
     """Run a single query N times on GPU, return list of elapsed_ms and row count."""
     escaped_sql = sql.replace("'", "''")
     abs_dir = os.path.abspath(data_dir)
@@ -115,7 +115,7 @@ def run_gpu_query(sql: str, data_dir: str, gpu_cache: str, gpu_proc: str,
 
     try:
         result = subprocess.run(
-            [SIRIUS_BIN, '-unsigned', '-init', tmp_path, '-c', '.quit'],
+            [sirius_bin, '-unsigned', '-init', tmp_path, '-c', '.quit'],
             capture_output=True, text=True, env=env, timeout=600
         )
     finally:
@@ -151,11 +151,8 @@ def main():
     p.add_argument('--cpu-only', action='store_true')
     args = p.parse_args()
 
-    global SIRIUS_BIN
-    SIRIUS_BIN = args.sirius_binary
-
-    if not os.path.exists(SIRIUS_BIN) and not args.cpu_only:
-        print(f"ERROR: Sirius binary not found: {SIRIUS_BIN}")
+    if not os.path.exists(args.sirius_binary) and not args.cpu_only:
+        print(f"ERROR: Sirius binary not found: {args.sirius_binary}")
         print(f"Set SIRIUS_BIN env var or build Sirius first.")
         sys.exit(1)
 
@@ -205,7 +202,8 @@ def main():
             gpu_times, gpu_rows, gpu_output = run_gpu_query(
                 sql, args.data_dir, args.gpu_cache_size,
                 args.gpu_processing_size,
-                args.warmup_runs + args.benchmark_runs
+                args.warmup_runs + args.benchmark_runs,
+                sirius_bin=args.sirius_binary,
             )
             # Last N are the timed runs
             gpu_timed = gpu_times[-args.benchmark_runs:] if len(gpu_times) >= args.benchmark_runs else gpu_times
