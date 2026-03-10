@@ -106,8 +106,11 @@ def run_gpu(sql: str, data_dir: str, gpu_cache: str, gpu_proc: str) -> tuple[int
     timer_on_pos = output.rfind('.timer on')
     after_timer = output[timer_on_pos:] if timer_on_pos >= 0 else output
     rows_matches = re.findall(r'(\d+)\s+rows?', after_timer)
-    if rows_matches:
-        row_count = int(rows_matches[-1])
+    # "CALL gpu_processing(...)" itself emits "0 rows" as its wrapper result —
+    # filter those out and look for the actual inner query row count.
+    nonzero = [int(m) for m in rows_matches if int(m) > 0]
+    if nonzero:
+        row_count = nonzero[-1]
     elif '└' in after_timer or ('Run Time' in after_timer and '│' in after_timer):
         row_count = 1  # single-row result (DuckDB omits "X rows" for 1-row tables)
     else:
