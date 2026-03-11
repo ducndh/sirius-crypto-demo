@@ -67,6 +67,9 @@ For H100: set `GPU_CACHE_SIZE='70 GB'` and `GPU_PROC_SIZE='60 GB'`.
 | Q08   | Aggregation      | Hourly gas price trends                          |
 | Q09   | Aggregation      | Most active address pairs                        |
 | Q10   | Aggregation      | Block-level statistics                           |
+| Q11   | Graph (cuGraph)  | PageRank — most important addresses              |
+| Q12   | Graph (cuGraph)  | Connected Components — entity clustering         |
+| Q13   | Graph (cuGraph)  | BFS — transaction trace from flagged address     |
 
 ## Data sources
 

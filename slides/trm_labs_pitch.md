@@ -49,12 +49,12 @@ SQL-compatible analytics engine that runs entirely on GPU.
 
 ```
 DuckDB SQL planner  →  cuDF GPU execution  →  cuGraph analytics
-    (familiar SQL)       (memory bandwidth)     (graph, zero-copy)
+    (familiar SQL)       (memory bandwidth)     (graph, via CUDA IPC)
 ```
 
 - **Same SQL you already write** — no new query language
-- **10–50x faster** on analytical workloads
-- **Graph analytics built in** — no export, no round-trips
+- **Up to 350x faster** on analytical workloads
+- **Graph analytics built in** — PageRank, BFS, WCC from SQL
 
 ---
 
@@ -65,10 +65,10 @@ DuckDB SQL planner  →  cuDF GPU execution  →  cuGraph analytics
 │                     Sirius                          │
 │  ┌──────────┐    ┌─────────────┐   ┌─────────────┐ │
 │  │  DuckDB  │    │    cuDF     │   │  cuGraph    │ │
-│  │  Planner │ →  │  Columnar   │ → │  (roadmap)  │ │
+│  │  Planner │ →  │  Columnar   │ → │  (via IPC)  │ │
 │  │  (SQL)   │    │  GPU Exec   │   │             │ │
 │  └──────────┘    └─────────────┘   └─────────────┘ │
-│              All in GPU Memory (80GB HBM3)          │
+│              All in GPU Memory (24GB / 80GB)        │
 └─────────────────────────────────────────────────────┘
         ↑ Load once           ↓ Query results (ms)
    [ Parquet files ]      [ Analyst / API ]
@@ -80,26 +80,12 @@ vs. today: SQL → export → Python → NetworkX → results *(3 systems, 2 cop
 
 ## Benchmark Setup
 
-- **Hardware**: NVIDIA H100 80GB HBM3 *(RTX 6000 for dev)*
+- **Hardware**: NVIDIA Quadro RTX 6000 (24GB) — *scales to H100 80GB*
 - **Data**: Real Ethereum transactions — AWS Public Blockchain Data
-  - 200M+ transactions, 100M+ token transfers
+  - 10M+ transactions, 8M+ token transfers
   - Real ETH/USD prices (CoinGecko hourly)
-- **Baseline**: DuckDB — the fastest single-node CPU analytics engine
-- **Queries**: 10 queries across 3 categories TRM Labs runs daily
-
----
-
-## Raw Analytics: 10–30x Faster
-
-*Scan/filter queries on 200M transactions*
-
-| Query | Description | CPU (DuckDB) | Sirius GPU | Speedup |
-|-------|-------------|:---:|:---:|:---:|
-| Q01 | Count txns in date range | XXX ms | XX ms | **XX.Xx** |
-| Q02 | Address activity summary | XXX ms | XX ms | **XX.Xx** |
-| Q03 | Top 100 addresses by volume | XXX ms | XX ms | **XX.Xx** |
-
-> "Standard compliance queries: run them all day without a cluster."
+- **Baseline**: DuckDB v1.4.4 — the fastest single-node CPU analytics engine
+- **Queries**: 10 analytics + 3 graph queries
 
 ---
 
@@ -123,63 +109,79 @@ Competitors require separate preprocessing or Python UDFs.
 
 ## ASOF JOIN Results
 
-*Matching 200M transactions to hourly ETH/USD prices*
+*Matching 10M transactions to hourly ETH/USD prices (RTX 6000)*
 
 | Query | Description | CPU (DuckDB) | Sirius GPU | Speedup |
 |-------|-------------|:---:|:---:|:---:|
-| Q04 | All txns → USD value | XXX ms | XX ms | **XX.Xx** |
-| Q05 | Daily USD volume | XXX ms | XX ms | **XX.Xx** |
-| Q06 | Top senders by USD | XXX ms | XX ms | **XX.Xx** |
+| Q04 | All txns → USD value | 24.0s | 67ms | **358x** |
+| Q05 | Daily USD volume | 24.1s | 149ms | **162x** |
 
 > "Price-matched analytics in milliseconds. No ETL pipeline needed."
 
 ---
 
-## Heavy Aggregation
+## Analytics Results
 
-*GROUP BY on 200M transactions*
+*Scan, filter, aggregation on 10M transactions (RTX 6000)*
 
 | Query | Description | CPU (DuckDB) | Sirius GPU | Speedup |
 |-------|-------------|:---:|:---:|:---:|
-| Q07 | Top ERC-20 tokens by activity | XXX ms | XX ms | **XX.Xx** |
-| Q08 | Hourly gas price trends | XXX ms | XX ms | **XX.Xx** |
-| Q09 | Active address pairs | XXX ms | XX ms | **XX.Xx** |
-| Q10 | Block-level statistics | XXX ms | XX ms | **XX.Xx** |
+| Q03 | Top 100 addresses by volume | 1,186ms | 266ms | **4.5x** |
+| Q08 | Hourly gas price trends | 248ms | 206ms | **1.2x** |
+| Q10 | Block-level statistics | 161ms | 83ms | **1.9x** |
+
+Expect **10–50x** on H100 80GB with 200M+ rows (memory bandwidth scales).
 
 ---
 
-## Graph Analytics — Roadmap
+## Graph Analytics — From SQL
 
-**cuGraph integration brings graph analytics directly to GPU memory.**
+**cuGraph integration brings graph analytics directly to SQL.**
 
-No data export. No Python round-trip. Zero-copy from SQL results to graph.
+No data export. No Python round-trip. Results via CUDA IPC.
 
-| Algorithm | Use Case |
-|-----------|----------|
-| Connected Components | Entity clustering (address → entity) |
-| BFS (depth-limited) | Transaction tracing from flagged address |
-| PageRank | Risk scoring by network centrality |
-| Louvain / Leiden | Community detection (mixing services) |
-| Triangle Count | Cyclic transaction detection |
+```sql
+-- PageRank: find most important addresses
+SELECT * FROM gpu_graph_pagerank('tx_edges', 'src', 'dst')
+ORDER BY pagerank DESC LIMIT 20;
+
+-- BFS: trace transactions from a flagged address (3 hops)
+SELECT * FROM gpu_graph_bfs('tx_edges', 'src', 'dst',
+    '0x75e89d...', 3) ORDER BY distance LIMIT 50;
+
+-- Connected Components: cluster addresses into entities
+SELECT component, COUNT(*) AS size
+FROM gpu_graph_wcc('tx_edges', 'src', 'dst')
+GROUP BY 1 ORDER BY 2 DESC;
+```
 
 ---
 
-## The Killer Query (Roadmap)
+## The Killer Query
 
 ```
 "Find all addresses within 3 hops of a sanctioned entity
  that received >$10K USD in the last 30 days"
 ```
 
-| Step | Operation | Time |
-|------|-----------|------|
-| 1 | BFS from sanctioned address (cuGraph) | ~100ms |
-| 2 | ASOF JOIN transactions → USD prices | ~500ms |
-| 3 | Filter by amount + date | ~100ms |
+```sql
+-- Step 1: BFS from sanctioned address
+CREATE TABLE suspects AS
+  SELECT vertex FROM gpu_graph_bfs('tx_edges','src','dst','0xSanctioned',3);
 
-**Total: ~1 second** — all on GPU, no data movement.
+-- Step 2: ASOF JOIN + filter by USD amount and date
+CALL gpu_processing('
+  SELECT t.to_address, SUM(t.value/1e18 * p.price_usd) AS usd
+  FROM eth_transactions t
+  ASOF JOIN prices p ON t.block_timestamp >= p.ts
+  WHERE t.block_timestamp >= ''2024-02-01''
+    AND t.to_address IN (SELECT vertex FROM suspects)
+  GROUP BY 1 HAVING SUM(t.value/1e18 * p.price_usd) > 10000
+  ORDER BY 2 DESC
+');
+```
 
-*Current stack: minutes (export → NetworkX → re-import → SQL)*
+**Graph + ASOF JOIN + aggregation — all on one GPU, seconds total.**
 
 ---
 
@@ -205,7 +207,7 @@ Every subsequent query            → memory bandwidth speed (ms)
 
 ## Live Demo
 
-*Loading 35M real Ethereum transactions into GPU memory...*
+*Loading 10M real Ethereum transactions into GPU memory...*
 
 ```bash
 $ bash scripts/run_live_demo.sh
@@ -223,7 +225,7 @@ $ bash scripts/run_live_demo.sh
 **Production path:**
 - Single H100 node replaces a CPU analytics cluster
 - DuckDB-compatible SQL — minimal code changes
-- cuGraph integration for on-GPU graph analytics (Q3 2025)
+- cuGraph: PageRank, BFS, WCC today — Louvain, triangle count next
 
 ---
 
@@ -237,31 +239,32 @@ $ bash scripts/run_live_demo.sh
 
 ---
 
-## Appendix: cuGraph Algorithm Reference
+## Appendix: cuGraph Algorithms
 
-| Algorithm | cuGraph API | TRM Labs Use Case | ~Time (H100, 1B edges) |
-|-----------|------------|-------------------|----------------------|
-| Connected Components | `connected_components()` | Entity clustering | seconds |
-| BFS | `bfs()` | Transaction tracing | milliseconds |
-| PageRank | `pagerank()` | Risk scoring | seconds |
-| Louvain | `louvain()` | Community detection | seconds |
-| Triangle Count | `triangle_count()` | Cyclic tx detection | seconds |
-| Betweenness Centrality | `betweenness_centrality()` | Bridge addresses | minutes* |
-
-*\*sampling available*
+| Algorithm | Status | SQL Function | TRM Use Case |
+|-----------|:------:|------------|------------|
+| PageRank | **Live** | `gpu_graph_pagerank()` | Risk scoring by centrality |
+| BFS | **Live** | `gpu_graph_bfs()` | Transaction tracing |
+| Connected Components | **Live** | `gpu_graph_wcc()` | Entity clustering |
+| Louvain / Leiden | Roadmap | — | Community detection |
+| Triangle Count | Roadmap | — | Cyclic tx detection |
 
 ---
 
-## Appendix: Compute Model Fit
+## Appendix: Architecture
 
-**Concern**: Sirius cold runs are expensive (PCIe transfer). Writes invalidate GPU cache.
+```
+┌────────────────── Sirius Process ──────────────────┐
+│  DuckDB planner → cuDF execution (GPU VRAM)        │
+│       ↕ edge table via binary pipe                  │
+│  ┌──────────────── cuGraph Worker ───────────────┐  │
+│  │  Python subprocess (fork+exec)                │  │
+│  │  Builds CSR graph → runs cuGraph algorithm    │  │
+│  │  Returns results via CUDA IPC (zero-copy GPU) │  │
+│  └───────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────┘
+```
 
-**Why blockchain analytics still works:**
-
-| Workload Type | Cache Behavior | Fit? |
-|---------------|---------------|------|
-| Historical batch (90%) | Load once, query many times → always hot | ✅ Perfect |
-| Near-real-time alerting (10%) | Constant writes → cache invalidation | ❌ Stay on CPU |
-
-**Demo strategy**: Report "load time" once, report "query time" as the repeatable benefit.
-Never demo the write path.
+- **Why out-of-process?** cuGraph and cuDF have CUDA context conflicts
+- **Why CUDA IPC?** Results stay on GPU — no D2H → H2D round-trip
+- **Overhead:** ~100ms subprocess startup, amortized over algorithm runtime

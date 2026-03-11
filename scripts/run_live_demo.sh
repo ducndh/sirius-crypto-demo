@@ -1,7 +1,8 @@
 #!/bin/bash
 # Live demo launcher for the TRM Labs pitch.
-# Loads all tables into GPU VRAM, then drops into interactive Sirius shell.
-# Presenter can run queries from queries/ or let audience type ad-hoc SQL.
+# Loads all tables into GPU VRAM, builds transaction graph, then drops into
+# interactive Sirius shell.  Presenter can run queries from queries/ or let
+# audience type ad-hoc SQL.
 #
 # Usage:
 #   bash scripts/run_live_demo.sh
@@ -33,7 +34,7 @@ fi
 for f in eth_transactions.parquet prices.parquet token_transfers.parquet; do
   if [[ ! -f "$DATA_DIR/$f" ]]; then
     echo "ERROR: $DATA_DIR/$f not found."
-    echo "Run: bash scripts/download_eth_data.sh dev && python scripts/prepare_demo_data.py"
+    echo "Run: python scripts/download_eth_data.py --scale dev && python scripts/download_prices.py"
     exit 1
   fi
 done
@@ -51,6 +52,12 @@ CREATE TABLE eth_transactions AS SELECT * FROM '${DATA_DIR}/eth_transactions.par
 CREATE TABLE prices           AS SELECT * FROM '${DATA_DIR}/prices.parquet';
 CREATE TABLE token_transfers  AS SELECT * FROM '${DATA_DIR}/token_transfers.parquet';
 
+-- Build transaction graph edge table (for graph analytics queries)
+CREATE TABLE tx_edges AS
+  SELECT from_address AS src, to_address AS dst
+  FROM eth_transactions
+  WHERE value > 0;
+
 -- Pre-warm: pull all data into GPU VRAM
 CALL gpu_processing('SELECT COUNT(*) FROM eth_transactions');
 
@@ -58,28 +65,38 @@ CALL gpu_processing('SELECT COUNT(*) FROM eth_transactions');
 .timer on
 
 -- ─────────────────────────────────────────────────────────────────
--- DEMO READY. Run queries with:
---   CALL gpu_processing('your SQL here');
+-- DEMO READY
 --
--- Example queries (see queries/ directory for full list):
+-- Analytics queries (GPU-accelerated):
 --   CALL gpu_processing('SELECT COUNT(*) FROM eth_transactions WHERE block_timestamp >= ''2024-01-15''');
 --   CALL gpu_processing('SELECT from_address, COUNT(*) FROM eth_transactions GROUP BY 1 ORDER BY 2 DESC LIMIT 10');
+--
+-- ASOF JOIN (unique to Sirius — no other GPU DB supports this):
+--   CALL gpu_processing('SELECT COUNT(*), SUM(t.value/1e18 * p.price_usd) FROM eth_transactions t ASOF JOIN prices p ON t.block_timestamp >= p.ts');
+--
+-- Graph analytics (cuGraph via CUDA IPC):
+--   SELECT * FROM gpu_graph_pagerank('tx_edges', 'src', 'dst') ORDER BY pagerank DESC LIMIT 20;
+--   SELECT component, COUNT(*) AS size FROM gpu_graph_wcc('tx_edges', 'src', 'dst') GROUP BY 1 ORDER BY 2 DESC LIMIT 20;
+--   SELECT * FROM gpu_graph_bfs('tx_edges', 'src', 'dst', '0x75e89d5979e4f6fba9f97c104c2f0afb3f1dcb88', 3) ORDER BY distance LIMIT 50;
 -- ─────────────────────────────────────────────────────────────────
 EOF
 
 echo ""
-echo "╔══════════════════════════════════════════════════════════╗"
-echo "║          Sirius GPU Analytics — Live Demo                ║"
-echo "╠══════════════════════════════════════════════════════════╣"
+echo "╔═══════════════════════════════════════════════════════════════╗"
+echo "║          Sirius GPU Analytics — Live Demo                    ║"
+echo "╠═══════════════════════════════════════════════════════════════╣"
 echo "║  Hardware : $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo 'GPU')"
-echo "║  GPU cache: ${GPU_CACHE} / ${GPU_PROC}"
+echo "║  GPU cache: ${GPU_CACHE} / proc: ${GPU_PROC}"
 echo "║  Data dir : ${DATA_DIR}"
-echo "╚══════════════════════════════════════════════════════════╝"
+echo "╠═══════════════════════════════════════════════════════════════╣"
+echo "║  ANALYTICS:  CALL gpu_processing('SELECT ...');              ║"
+echo "║  GRAPH:      SELECT * FROM gpu_graph_pagerank('tx_edges',    ║"
+echo "║              'src', 'dst') ORDER BY pagerank DESC LIMIT 20;  ║"
+echo "╚═══════════════════════════════════════════════════════════════╝"
 echo ""
-echo "Demo query files:  ls ${QUERIES_DIR}/"
-echo "Run a query:       CALL gpu_processing('SELECT ...');"
+echo "Query files:  ls ${QUERIES_DIR}/"
 echo ""
-echo "Loading data into GPU VRAM (one-time cost)..."
+echo "Loading data into GPU VRAM + building transaction graph..."
 echo ""
 
 export LD_LIBRARY_PATH="${SIRIUS_PIXI_ENV}/lib:${LD_LIBRARY_PATH:-}"
