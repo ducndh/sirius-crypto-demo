@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   starrocks:
-    image: starrocks/allin1-ubuntu:latest
+    image: starrocks/allin1-ubuntu:3.4-latest
     container_name: sirius-demo-starrocks
     ports:
       - "9030:9030"   # MySQL protocol (query port)
