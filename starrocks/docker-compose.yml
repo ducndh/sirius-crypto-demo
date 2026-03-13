@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  starrocks:
+    image: starrocks/allin1-ubuntu:latest
+    container_name: sirius-demo-starrocks
+    ports:
+      - "9030:9030"   # MySQL protocol (query port)
+      - "8030:8030"   # HTTP API
+      - "8040:8040"   # BE HTTP
+    volumes:
+      - ./data:/opt/starrocks/data
+      - ../data:/data  # mount demo data for loading
+    environment:
+      - JAVA_OPTS=-Xmx8g
+    mem_limit: 16g
+    restart: unless-stopped

@@ -1,9 +1,20 @@
-data/raw/
-data/*.parquet
+# Data files (large, downloaded separately)
+data/synthetic/*.parquet
+data/mbal/*.csv
+data/mbal/*.zip
+data/eth_transfers/
 data/*.duckdb
-results/
+data/raw/
+
+# Benchmark results (regenerated)
+benchmark/results/*.json
+
+# Build artifacts
 slides/*.html
 slides/*.pdf
 __pycache__/
 *.pyc
 .env
+
+# StarRocks data
+starrocks/data/

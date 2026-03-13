@@ -1,84 +1,78 @@
 # sirius-crypto-demo
 
-End-to-end benchmark and live demo harness for [Sirius](https://github.com/sirius-db/sirius)
-GPU analytics on real blockchain data.
+End-to-end benchmark and demo harness for [Sirius](https://github.com/sirius-db/sirius)
+GPU analytics on blockchain data — targeting the TRM Labs counterparty flow workload.
 
-## What this is
+## Repository Structure
 
-Benchmarks and demo queries for pitching Sirius GPU analytics on Ethereum transaction data.
-Compares Sirius GPU vs DuckDB CPU on queries TRM Labs actually runs: scan/filter, ASOF JOIN
-for USD price matching, and heavy GROUP BY aggregation.
+```
+├── docs/                        # Analysis documents
+│   ├── 2hop_problem_explain.md  # Multi-hop BFS analysis for Xiangyao
+│   └── benchmark_plan.md        # Benchmark strategy
+├── data/
+│   ├── synthetic/               # Small parquet files for dev testing
+│   ├── mbal/                    # MBAL 10M address labels (Kaggle)
+│   └── eth_transfers/           # Ethereum token transfers (AWS)
+├── queries/
+│   ├── clickbench_style/        # Scan/filter/aggregation queries (q01-q10)
+│   ├── graph/                   # Graph analytics queries (q11-q13)
+│   └── trm_pipeline/            # TRM entity flow rollup queries
+├── benchmark/
+│   ├── run_duckdb.sh            # CPU baseline
+│   ├── run_sirius.sh            # GPU (gpu_processing + gpu_execution)
+│   ├── run_starrocks.sh         # StarRocks comparison
+│   └── results/                 # Benchmark outputs
+├── scripts/                     # Data download and preparation
+├── starrocks/                   # Docker setup for StarRocks
+└── slides/                      # Presentation materials
+```
+
+## The TRM Pipeline
+
+The core workload is **blockchain counterparty flow analytics**:
+
+1. Parse raw transactions into address-level transfers
+2. Aggregate to daily grain: `from_address → to_address → amount` per asset per day
+3. Join with entity attribution map (MBAL: 10M labeled addresses)
+4. Roll up to entity-level flows for Sankey visualizations
+
+The key query pattern is a **double hash-join + GROUP BY aggregation** — exactly the workload
+where GPU acceleration should provide significant speedup over CPU-based systems like StarRocks.
+
+## Data Sources
+
+| Dataset | Source | Size | Description |
+|---------|--------|------|-------------|
+| Ethereum token transfers | [AWS Public Blockchain](https://registry.opendata.aws/aws-public-blockchain/) | ~GB/month | Parquet, partitioned by date |
+| MBAL address labels | [Kaggle](https://www.kaggle.com/datasets/yidongchaintoolai/mbal-10m-crypto-address-label-dataset) | ~1GB | 10M labeled crypto addresses |
+| ETH/USD prices | CoinGecko / CryptoDataDownload | <1MB | Hourly price data |
 
 ## Quickstart
 
 ```bash
-# 1. Install AWS CLI and Python deps
-sudo apt install awscli       # or: pip install awscli
-pip install duckdb requests   # or use the pixi env from sirius-asof
+# 1. Download data
+python scripts/download_mbal.py
+python scripts/download_eth_transfers.py --months 1
 
-# 2. Download real Ethereum data (7 days, ~8-10M rows, no account needed)
-python scripts/download_eth_data.py --scale dev
+# 2. Prepare tables
+python scripts/prepare_tables.py
 
-# 3. Download price data
-python scripts/download_prices.py
-
-# 4. Validate queries (CPU only first)
-python scripts/validate_queries.py --mode cpu-only
-
-# 6. Full benchmark (CPU vs GPU)
-export SIRIUS_BIN=/home/cc/sirius-asof/build/release/duckdb
-python scripts/run_demo_benchmark.py
-
-# 7. Live interactive demo
-bash scripts/run_live_demo.sh
+# 3. Run benchmarks
+bash benchmark/run_duckdb.sh       # CPU baseline
+bash benchmark/run_sirius.sh       # Sirius GPU
+bash benchmark/run_starrocks.sh    # StarRocks (requires Docker)
 ```
 
-## Scale targets
+## Environment Variables
 
-| Scale    | Date range  | ETH txns  | Disk  | Hardware   |
-|----------|-------------|-----------|-------|------------|
-| dev      | 7 days      | ~8-10M    | ~3GB  | Any GPU    |
-| rtx6000  | 30 days     | ~35-40M   | ~12GB | RTX 6000   |
-| h100     | 180 days    | ~200M+    | ~70GB | H100 80GB  |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SIRIUS_BIN` | `~/sirius-dev/build/release/duckdb` | Sirius binary path |
+| `SIRIUS_PIXI_ENV` | `~/sirius-dev/.pixi/envs/cuda12` | Pixi env for LD path |
+| `GPU_CACHE_SIZE` | `20 GB` | GPU cache allocation |
+| `GPU_PROC_SIZE` | `15 GB` | GPU processing buffer |
 
-## Environment variables
+## Related Documents
 
-| Variable              | Default                                          | Description           |
-|-----------------------|--------------------------------------------------|-----------------------|
-| `SIRIUS_BIN`          | `/home/cc/sirius-asof/build/release/duckdb`      | Sirius binary path    |
-| `SIRIUS_PIXI_ENV`     | `/home/cc/sirius-asof/.pixi/envs/cuda12`         | Pixi env for LD path  |
-| `GPU_CACHE_SIZE`      | `20 GB`                                          | GPU cache (RTX 6000)  |
-| `GPU_PROC_SIZE`       | `15 GB`                                          | GPU proc (RTX 6000)   |
-| `DATA_DIR`            | `data`                                           | Parquet files dir     |
-
-For H100: set `GPU_CACHE_SIZE='70 GB'` and `GPU_PROC_SIZE='60 GB'`.
-
-## Queries
-
-| Query | Category         | Description                                      |
-|-------|-----------------|--------------------------------------------------|
-| Q01   | Scan/Filter      | Count transactions in date range                 |
-| Q02   | Scan/Filter      | Activity summary for a specific address          |
-| Q03   | Scan/Filter      | Top 100 addresses by transaction count           |
-| Q04   | ASOF JOIN        | Match all transactions to ETH/USD price          |
-| Q05   | ASOF JOIN        | Daily USD volume over time                       |
-| Q06   | ASOF JOIN        | Top 50 senders by total USD volume               |
-| Q07   | Aggregation      | Top token contracts by transfer activity         |
-| Q08   | Aggregation      | Hourly gas price trends                          |
-| Q09   | Aggregation      | Most active address pairs                        |
-| Q10   | Aggregation      | Block-level statistics                           |
-| Q11   | Graph (cuGraph)  | PageRank — most important addresses              |
-| Q12   | Graph (cuGraph)  | Connected Components — entity clustering         |
-| Q13   | Graph (cuGraph)  | BFS — transaction trace from flagged address     |
-
-## Data sources
-
-- **Transactions**: [AWS Public Blockchain Data](https://registry.opendata.aws/aws-public-blockchain/)
-  (`s3://aws-public-blockchain/v1.0/eth/` — free, no auth)
-- **Prices**: [CoinGecko API](https://www.coingecko.com/en/api) (free tier, hourly)
-  or [CryptoDataDownload](https://www.cryptodatadownload.com/)
-
-## Slide deck
-
-See `slides/trm_labs_pitch.md` — Marp-compatible markdown.
-Render with: `npx @marp-team/marp-cli slides/trm_labs_pitch.md --html`
+- [2-Hop Problem Analysis](docs/2hop_problem_explain.md) — why recursive CTEs can't do bounded BFS efficiently
+- [TRM Pipeline Spec](docs/trm_pipeline.md) — full TRM counterparty flow specification
