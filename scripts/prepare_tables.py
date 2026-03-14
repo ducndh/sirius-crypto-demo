@@ -144,6 +144,69 @@ def main():
                   args.sirius_bin, args.pixi_env)
     print(f"  Materialized: {out}")
 
+    # 4. Normalize addresses (AWS uses 66-char zero-padded, MBAL uses 42-char)
+    print("\n[4/6] Normalizing addresses (66→42 char)...")
+    run_sql(db_path, """
+        UPDATE address_flows_daily
+        SET from_address = '0x' || SUBSTR(from_address, 27),
+            to_address   = '0x' || SUBSTR(to_address, 27)
+        WHERE LENGTH(from_address) = 66;
+    """, args.sirius_bin, args.pixi_env)
+    print("  Done")
+
+    # 5. Create DICT (dictionary-encoded) tables for V3 benchmark
+    print("\n[5/6] Creating dictionary-encoded tables...")
+    run_sql(db_path, """
+        -- Build address dictionary from entity_address_map
+        CREATE TABLE address_dictionary AS
+        SELECT address, ROW_NUMBER() OVER (ORDER BY address)::INTEGER AS addr_id
+        FROM (SELECT DISTINCT address FROM entity_address_map);
+    """, args.sirius_bin, args.pixi_env)
+    out = run_sql(db_path, "SELECT COUNT(*) FROM address_dictionary;",
+                  args.sirius_bin, args.pixi_env)
+    print(f"  Dictionary: {out} addresses")
+
+    run_sql(db_path, """
+        CREATE TABLE entity_address_map_dict AS
+        SELECT e.entity, e.category, e.attribution_source, d.addr_id
+        FROM entity_address_map e
+        JOIN address_dictionary d ON e.address = d.address;
+    """, args.sirius_bin, args.pixi_env)
+
+    run_sql(db_path, """
+        CREATE TABLE address_flows_daily_dict AS
+        SELECT
+            f.date, f.asset, f.amount, f.tx_count,
+            COALESCE(d_from.addr_id, 0) AS from_addr_id,
+            COALESCE(d_to.addr_id, 0) AS to_addr_id
+        FROM address_flows_daily f
+        LEFT JOIN address_dictionary d_from ON f.from_address = d_from.address
+        LEFT JOIN address_dictionary d_to   ON f.to_address   = d_to.address;
+    """, args.sirius_bin, args.pixi_env)
+    print("  Created: entity_address_map_dict, address_flows_daily_dict")
+
+    # 6. Export parquets for gpu_execution
+    print("\n[6/6] Exporting parquet files for gpu_execution...")
+    pq_dir = DATA_DIR
+    run_sql(db_path, f"""
+        COPY token_transfers TO '{pq_dir}/bench_token_transfers.parquet'
+            (FORMAT PARQUET, COMPRESSION ZSTD);
+        COPY address_flows_daily TO '{pq_dir}/bench_flows_varchar.parquet'
+            (FORMAT PARQUET, COMPRESSION ZSTD);
+        COPY entity_address_map TO '{pq_dir}/bench_entity_varchar.parquet'
+            (FORMAT PARQUET, COMPRESSION ZSTD);
+        COPY address_flows_daily_dict TO '{pq_dir}/bench_flows_dict.parquet'
+            (FORMAT PARQUET, COMPRESSION ZSTD);
+        COPY entity_address_map_dict TO '{pq_dir}/bench_entity_dict.parquet'
+            (FORMAT PARQUET, COMPRESSION ZSTD);
+    """, args.sirius_bin, args.pixi_env)
+    for name in ["bench_token_transfers", "bench_flows_varchar",
+                  "bench_entity_varchar", "bench_flows_dict", "bench_entity_dict"]:
+        pq = os.path.join(pq_dir, f"{name}.parquet")
+        if os.path.exists(pq):
+            sz = os.path.getsize(pq) / 1024 / 1024
+            print(f"  {name}.parquet: {sz:.0f} MB")
+
     # Summary
     print("\n--- Database Summary ---")
     out = run_sql(db_path, """

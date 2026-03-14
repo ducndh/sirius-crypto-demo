@@ -1,13 +1,10 @@
 # Data files (large, downloaded separately)
-data/synthetic/*.parquet
-data/mbal/*.csv
-data/mbal/*.zip
-data/eth_transfers/
-data/*.duckdb
-data/raw/
+data/
+!data/.gitkeep
 
-# Benchmark results (regenerated)
+# Benchmark results (JSON regenerated, keep CSVs)
 benchmark/results/*.json
+benchmark/results/*.cfg
 
 # Build artifacts
 slides/*.html
@@ -18,3 +15,7 @@ __pycache__/
 
 # StarRocks data
 starrocks/data/
+
+# Runtime logs
+log/
+cufile.log
