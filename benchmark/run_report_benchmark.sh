@@ -31,11 +31,11 @@ QUERIES=("$Q02" "$Q03" "$Q04" "$Q05" "$Q06")
 QNAMES=("Q02" "Q03" "Q04" "Q05" "Q06")
 
 # gpu_execution dict queries — double-escaped for CALL gpu_execution('...')
-Q02_GE="SELECT f.date, f.asset, COALESCE(src.entity, ''unknown'') AS from_entity, COALESCE(dst.entity, ''unknown'') AS to_entity, SUM(f.amount) AS amount FROM flows f LEFT JOIN entity_map src ON f.from_addr_id = src.addr_id LEFT JOIN entity_map dst ON f.to_addr_id = dst.addr_id GROUP BY 1,2,3,4 HAVING from_entity != ''unknown'' AND to_entity != ''unknown'' ORDER BY amount DESC LIMIT 20"
-Q03_GE="SELECT COALESCE(src.entity, ''unknown'') AS from_entity, COALESCE(dst.entity, ''unknown'') AS to_entity, SUM(f.amount) AS total_flow, COUNT(*) AS num_pairs FROM flows f JOIN entity_map src ON f.from_addr_id = src.addr_id JOIN entity_map dst ON f.to_addr_id = dst.addr_id GROUP BY 1,2 ORDER BY total_flow DESC LIMIT 100"
+Q02_GE="SELECT f.date, f.asset, CASE WHEN src.entity IS NOT NULL THEN src.entity ELSE ''unknown'' END AS from_entity, CASE WHEN dst.entity IS NOT NULL THEN dst.entity ELSE ''unknown'' END AS to_entity, SUM(f.amount) AS amount FROM flows f LEFT JOIN entity_map src ON f.from_addr_id = src.addr_id LEFT JOIN entity_map dst ON f.to_addr_id = dst.addr_id GROUP BY 1,2,3,4 HAVING from_entity != ''unknown'' AND to_entity != ''unknown'' ORDER BY amount DESC LIMIT 20"
+Q03_GE="SELECT CASE WHEN src.entity IS NOT NULL THEN src.entity ELSE ''unknown'' END AS from_entity, CASE WHEN dst.entity IS NOT NULL THEN dst.entity ELSE ''unknown'' END AS to_entity, SUM(f.amount) AS total_flow, COUNT(*) AS num_pairs FROM flows f JOIN entity_map src ON f.from_addr_id = src.addr_id JOIN entity_map dst ON f.to_addr_id = dst.addr_id GROUP BY 1,2 ORDER BY total_flow DESC LIMIT 100"
 Q04_GE="SELECT f.date, SUM(f.amount) AS daily_flow FROM flows f JOIN entity_map src ON f.from_addr_id = src.addr_id JOIN entity_map dst ON f.to_addr_id = dst.addr_id WHERE src.entity = ''metamask'' AND dst.entity = ''uniswap'' GROUP BY 1 ORDER BY f.date"
-Q05_GE="WITH outflows AS (SELECT src.entity, SUM(f.amount) AS total_outflow FROM flows f JOIN entity_map src ON f.from_addr_id = src.addr_id GROUP BY 1), inflows AS (SELECT dst.entity, SUM(f.amount) AS total_inflow FROM flows f JOIN entity_map dst ON f.to_addr_id = dst.addr_id GROUP BY 1) SELECT COALESCE(o.entity, i.entity) AS entity, COALESCE(i.total_inflow,0) AS total_inflow, COALESCE(o.total_outflow,0) AS total_outflow FROM outflows o FULL OUTER JOIN inflows i ON o.entity = i.entity ORDER BY total_outflow DESC LIMIT 100"
-Q06_GE="SELECT COALESCE(src.category, ''unknown'') AS from_category, COALESCE(dst.category, ''unknown'') AS to_category, SUM(f.amount) AS total_flow FROM flows f JOIN entity_map src ON f.from_addr_id = src.addr_id JOIN entity_map dst ON f.to_addr_id = dst.addr_id GROUP BY 1,2 ORDER BY total_flow DESC"
+Q05_GE="WITH outflows AS (SELECT src.entity, SUM(f.amount) AS total_outflow FROM flows f JOIN entity_map src ON f.from_addr_id = src.addr_id GROUP BY 1), inflows AS (SELECT dst.entity, SUM(f.amount) AS total_inflow FROM flows f JOIN entity_map dst ON f.to_addr_id = dst.addr_id GROUP BY 1) SELECT CASE WHEN o.entity IS NOT NULL THEN o.entity ELSE i.entity END AS entity, CASE WHEN i.total_inflow IS NOT NULL THEN i.total_inflow ELSE 0 END AS total_inflow, CASE WHEN o.total_outflow IS NOT NULL THEN o.total_outflow ELSE 0 END AS total_outflow FROM outflows o FULL OUTER JOIN inflows i ON o.entity = i.entity ORDER BY total_outflow DESC LIMIT 100"
+Q06_GE="SELECT CASE WHEN src.category IS NOT NULL THEN src.category ELSE ''unknown'' END AS from_category, CASE WHEN dst.category IS NOT NULL THEN dst.category ELSE ''unknown'' END AS to_category, SUM(f.amount) AS total_flow FROM flows f JOIN entity_map src ON f.from_addr_id = src.addr_id JOIN entity_map dst ON f.to_addr_id = dst.addr_id GROUP BY 1,2 ORDER BY total_flow DESC"
 
 QUERIES_GE=("$Q02_GE" "$Q03_GE" "$Q04_GE" "$Q05_GE" "$Q06_GE")
 
@@ -115,24 +115,26 @@ run_cpu() {
     local dataset="$1" qi="$2" date_filter="$3"
 
     local query="${QUERIES[$qi]}"
-    if [[ -n "$date_filter" ]]; then
-        # Add date filter for 3-month subset
-        # Insert WHERE f.date >= '2025-10-01' into query
-        query=$(echo "$query" | sed "s/FROM address_flows_daily_dict f/FROM address_flows_daily_dict f/")
-    fi
 
-    local start end ms
-    # Warmup
-    echo "$query" | "$DUCKDB" "$DB_PATH" 2>/dev/null >/dev/null || true
+    # Run warmup + measured in single DuckDB session with .timer on
+    local sql_cmds=""
+    sql_cmds+="$query;"$'\n'         # warmup (no timer)
+    sql_cmds+=".timer on"$'\n'
+    sql_cmds+="$query;"$'\n'         # measured
 
-    # Measured
-    start=$(date +%s%N)
-    echo "$query" | "$DUCKDB" "$DB_PATH" 2>/dev/null >/dev/null || true
-    end=$(date +%s%N)
-    ms=$(( (end - start) / 1000000 ))
+    local output
+    output=$(echo "$sql_cmds" | "$DUCKDB" "$DB_PATH" 2>&1) || true
 
-    echo "  ${QNAMES[$qi]} | cpu | warm | ${ms}ms"
-    echo "$dataset,${QNAMES[$qi]},cpu,warm,$ms" >> "$OUTFILE"
+    while IFS= read -r line; do
+        if [[ "$line" =~ "Run Time" ]]; then
+            local real_time ms
+            real_time=$(echo "$line" | grep -oP 'real \K[0-9.]+')
+            ms=$(echo "$real_time" | awk '{printf "%.0f", $1 * 1000}')
+            echo "  ${QNAMES[$qi]} | cpu | warm | ${ms}ms"
+            echo "$dataset,${QNAMES[$qi]},cpu,warm,$ms" >> "$OUTFILE"
+            break  # only report the first (measured) timer line
+        fi
+    done <<< "$output"
 }
 
 # ============================================================
@@ -154,11 +156,11 @@ Q06_3MO="SELECT COALESCE(src.category, 'unknown') AS from_category, COALESCE(dst
 QUERIES_3MO=("$Q02_3MO" "$Q03_3MO" "$Q04_3MO" "$Q05_3MO" "$Q06_3MO")
 
 # gpu_execution 3-month queries
-Q02_GE_3MO="SELECT f.date, f.asset, COALESCE(src.entity, ''unknown'') AS from_entity, COALESCE(dst.entity, ''unknown'') AS to_entity, SUM(f.amount) AS amount FROM flows f LEFT JOIN entity_map src ON f.from_addr_id = src.addr_id LEFT JOIN entity_map dst ON f.to_addr_id = dst.addr_id WHERE f.date >= ''2025-10-01'' GROUP BY 1,2,3,4 HAVING from_entity != ''unknown'' AND to_entity != ''unknown'' ORDER BY amount DESC LIMIT 20"
-Q03_GE_3MO="SELECT COALESCE(src.entity, ''unknown'') AS from_entity, COALESCE(dst.entity, ''unknown'') AS to_entity, SUM(f.amount) AS total_flow, COUNT(*) AS num_pairs FROM flows f JOIN entity_map src ON f.from_addr_id = src.addr_id JOIN entity_map dst ON f.to_addr_id = dst.addr_id WHERE f.date >= ''2025-10-01'' GROUP BY 1,2 ORDER BY total_flow DESC LIMIT 100"
+Q02_GE_3MO="SELECT f.date, f.asset, CASE WHEN src.entity IS NOT NULL THEN src.entity ELSE ''unknown'' END AS from_entity, CASE WHEN dst.entity IS NOT NULL THEN dst.entity ELSE ''unknown'' END AS to_entity, SUM(f.amount) AS amount FROM flows f LEFT JOIN entity_map src ON f.from_addr_id = src.addr_id LEFT JOIN entity_map dst ON f.to_addr_id = dst.addr_id WHERE f.date >= ''2025-10-01'' GROUP BY 1,2,3,4 HAVING from_entity != ''unknown'' AND to_entity != ''unknown'' ORDER BY amount DESC LIMIT 20"
+Q03_GE_3MO="SELECT CASE WHEN src.entity IS NOT NULL THEN src.entity ELSE ''unknown'' END AS from_entity, CASE WHEN dst.entity IS NOT NULL THEN dst.entity ELSE ''unknown'' END AS to_entity, SUM(f.amount) AS total_flow, COUNT(*) AS num_pairs FROM flows f JOIN entity_map src ON f.from_addr_id = src.addr_id JOIN entity_map dst ON f.to_addr_id = dst.addr_id WHERE f.date >= ''2025-10-01'' GROUP BY 1,2 ORDER BY total_flow DESC LIMIT 100"
 Q04_GE_3MO="SELECT f.date, SUM(f.amount) AS daily_flow FROM flows f JOIN entity_map src ON f.from_addr_id = src.addr_id JOIN entity_map dst ON f.to_addr_id = dst.addr_id WHERE src.entity = ''metamask'' AND dst.entity = ''uniswap'' AND f.date >= ''2025-10-01'' GROUP BY 1 ORDER BY f.date"
-Q05_GE_3MO="WITH outflows AS (SELECT src.entity, SUM(f.amount) AS total_outflow FROM flows f JOIN entity_map src ON f.from_addr_id = src.addr_id WHERE f.date >= ''2025-10-01'' GROUP BY 1), inflows AS (SELECT dst.entity, SUM(f.amount) AS total_inflow FROM flows f JOIN entity_map dst ON f.to_addr_id = dst.addr_id WHERE f.date >= ''2025-10-01'' GROUP BY 1) SELECT COALESCE(o.entity, i.entity) AS entity, COALESCE(i.total_inflow,0) AS total_inflow, COALESCE(o.total_outflow,0) AS total_outflow FROM outflows o FULL OUTER JOIN inflows i ON o.entity = i.entity ORDER BY total_outflow DESC LIMIT 100"
-Q06_GE_3MO="SELECT COALESCE(src.category, ''unknown'') AS from_category, COALESCE(dst.category, ''unknown'') AS to_category, SUM(f.amount) AS total_flow FROM flows f JOIN entity_map src ON f.from_addr_id = src.addr_id JOIN entity_map dst ON f.to_addr_id = dst.addr_id WHERE f.date >= ''2025-10-01'' GROUP BY 1,2 ORDER BY total_flow DESC"
+Q05_GE_3MO="WITH outflows AS (SELECT src.entity, SUM(f.amount) AS total_outflow FROM flows f JOIN entity_map src ON f.from_addr_id = src.addr_id WHERE f.date >= ''2025-10-01'' GROUP BY 1), inflows AS (SELECT dst.entity, SUM(f.amount) AS total_inflow FROM flows f JOIN entity_map dst ON f.to_addr_id = dst.addr_id WHERE f.date >= ''2025-10-01'' GROUP BY 1) SELECT CASE WHEN o.entity IS NOT NULL THEN o.entity ELSE i.entity END AS entity, CASE WHEN i.total_inflow IS NOT NULL THEN i.total_inflow ELSE 0 END AS total_inflow, CASE WHEN o.total_outflow IS NOT NULL THEN o.total_outflow ELSE 0 END AS total_outflow FROM outflows o FULL OUTER JOIN inflows i ON o.entity = i.entity ORDER BY total_outflow DESC LIMIT 100"
+Q06_GE_3MO="SELECT CASE WHEN src.category IS NOT NULL THEN src.category ELSE ''unknown'' END AS from_category, CASE WHEN dst.category IS NOT NULL THEN dst.category ELSE ''unknown'' END AS to_category, SUM(f.amount) AS total_flow FROM flows f JOIN entity_map src ON f.from_addr_id = src.addr_id JOIN entity_map dst ON f.to_addr_id = dst.addr_id WHERE f.date >= ''2025-10-01'' GROUP BY 1,2 ORDER BY total_flow DESC"
 
 QUERIES_GE_3MO=("$Q02_GE_3MO" "$Q03_GE_3MO" "$Q04_GE_3MO" "$Q05_GE_3MO" "$Q06_GE_3MO")
 
