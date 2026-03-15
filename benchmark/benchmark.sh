@@ -39,7 +39,14 @@ cd ..
 set +e
 
 # ---------------------------------------------------------------------------
-# 2. Download data
+# 2. Install Sirius config (required for gpu_execution)
+# ---------------------------------------------------------------------------
+mkdir -p ~/.sirius
+cp sirius.cfg ~/.sirius/sirius.cfg
+echo "Installed sirius.cfg to ~/.sirius/sirius.cfg"
+
+# ---------------------------------------------------------------------------
+# 3. Download data
 # ---------------------------------------------------------------------------
 mkdir -p data
 
@@ -54,13 +61,13 @@ echo "NOTE: Data download URLs not yet configured."
 echo "      Copy parquet files to data/ manually or use scripts/prepare_tables.py"
 
 # ---------------------------------------------------------------------------
-# 3. Load data into DuckDB
+# 4. Load data into DuckDB
 # ---------------------------------------------------------------------------
 echo -n "Load time: "
 command time -f '%e' duckdb crypto.db -f create.sql -f load.sql
 
 # ---------------------------------------------------------------------------
-# 4. Run benchmark
+# 5. Run benchmark
 # ---------------------------------------------------------------------------
 ./run.sh 2>&1 | tee log.txt
 
@@ -68,7 +75,7 @@ echo -n "Data size: "
 wc -c crypto.db
 
 # ---------------------------------------------------------------------------
-# 5. Format results
+# 6. Format results
 # ---------------------------------------------------------------------------
 # Output format: [cold, hot1, hot2] per query (same as ClickBench)
 cat log.txt | \
