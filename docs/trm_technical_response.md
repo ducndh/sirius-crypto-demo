@@ -5,160 +5,87 @@
 
 ---
 
-## 1. Summary
+## 1. What We Built
 
-We reproduced the TRM counterparty flow pipeline using public blockchain data (Ethereum token transfers from AWS Public Blockchain + MBAL 10M address labels) and benchmarked it on SiriusDB. This document shares our findings, architectural fit, and where we see the strongest opportunities.
+We reproduced the TRM counterparty flow pipeline using public blockchain data:
+- **Ethereum token transfers** (H2 2025) from AWS Public Blockchain S3
+- **MBAL 10M address labels** from Kaggle as the entity address map
+- **Dictionary-encoded integer join keys** — VARCHAR addresses mapped to 4-byte integer IDs
 
-**Key results on RTX 6000 (24GB VRAM, 48-core CPU):**
+Tables:
+- `address_flows_daily_dict`: daily from_addr_id → to_addr_id flows per asset (~117M rows for 3 months, ~228M rows for 6 months)
+- `entity_address_map_dict`: addr_id → entity/category mapping (~3.2M rows)
 
-### 3-month dataset (~117M address flows, ~3.2M entity mappings)
+Queries (Q02-Q06) match the patterns from the TRM brief: two JOINs on entity map + GROUP BY aggregation + ORDER BY LIMIT.
 
-| Query | Description | CPU (Parquet) | SiriusDB (hot) |
-|-------|-------------|---:|---:|
-| Q02 | Entity flow rollup (LEFT JOIN x2 + GROUP BY) | 259ms | 126ms |
-| Q03 | Top counterparty pairs (INNER JOIN x2 + GROUP BY) | 176ms | 127ms |
-| Q04 | Time-series flow between two entities | 146ms | 94ms |
-| Q05 | Entity inflow/outflow balance (FULL OUTER JOIN + CTE) | 313ms | 173ms |
-| Q06 | Category flow matrix (INNER JOIN x2 + GROUP BY) | 178ms | 119ms |
+## 2. Benchmark Results
 
-### 6-month dataset (~228M address flows)
+**Hardware:** 2x Intel Xeon Gold 6126 (48 threads) + Quadro RTX 6000 (24GB VRAM) + 187GB RAM
 
-| Query | Description | CPU (Parquet) | SiriusDB cold | SiriusDB hot |
+### 3-month (~117M flows)
+
+| Query | Description | CPU (Parquet) | SiriusDB gpu_processing cold | SiriusDB gpu_processing hot |
 |-------|-------------|---:|---:|---:|
-| Q02 | Entity flow rollup | 414ms | 2,731ms | 1,090ms |
-| Q03 | Top counterparty pairs | 248ms | 2,187ms | 547ms |
-| Q04 | Time-series flow | 226ms | 2,188ms | 566ms |
-| Q05 | Entity inflow/outflow balance | 494ms | 2,671ms | 999ms |
-| Q06 | Category flow matrix | 261ms | 2,326ms | 546ms |
+| Q02 | Entity flow rollup (LEFT JOIN x2) | 259ms | 336ms | 126ms |
+| Q03 | Top counterparty pairs (JOIN x2) | 176ms | 257ms | 127ms |
+| Q04 | Time-series between entities | 146ms | 224ms | 94ms |
+| Q05 | Inflow/outflow balance (FULL OUTER JOIN) | 313ms | 344ms | 173ms |
+| Q06 | Category flow matrix (JOIN x2) | 178ms | 276ms | 119ms |
 
-SiriusDB's GPU-cached execution path achieves **1.5-2x speedup** over CPU on the 3-month dataset. On the 6-month dataset, the current cold-start overhead (Parquet decode + GPU transfer) makes first queries slower, but hot queries are competitive. We expect the GPU advantage to grow significantly at larger scale.
+### 6-month (~228M flows)
 
-## 2. What We Built
+| Query | Description | CPU (Parquet) | SiriusDB gpu_execution cold | SiriusDB gpu_execution hot |
+|-------|-------------|---:|---:|---:|
+| Q02 | Entity flow rollup (LEFT JOIN x2) | 414ms | 2,731ms | 1,090ms |
+| Q03 | Top counterparty pairs (JOIN x2) | 248ms | 2,187ms | 547ms |
+| Q04 | Time-series between entities | 226ms | 2,188ms | 566ms |
+| Q05 | Inflow/outflow balance (FULL OUTER JOIN) | 494ms | 2,671ms | 999ms |
+| Q06 | Category flow matrix (JOIN x2) | 261ms | 2,326ms | 546ms |
 
-We implemented the full TRM pipeline as described in the technical brief:
+SiriusDB has two execution modes:
+- **gpu_processing**: Loads data into GPU memory, caches across queries. Requires dataset to fit in VRAM. Hot runs are 1.4-1.6x faster than CPU on parquet for 3-month data.
+- **gpu_execution**: Reads from Parquet directly, supports datasets larger than GPU memory.
 
-**Data preparation:**
-- Downloaded Ethereum token transfers (H2 2025) from AWS Public Blockchain S3 in Parquet format
-- Downloaded MBAL 10M address label dataset from Kaggle
-- Built `address_flows_daily` table: daily aggregation of from_address → to_address flows per asset
-- Built `entity_address_map` table: address → entity mapping from MBAL labels
-- Created dictionary-encoded variant (V3 DICT) with integer join keys for optimal join performance
+### Reference
 
-**Query workload:**
-- Q02: Entity flow rollup — two LEFT JOINs on entity map + GROUP BY date/asset/entity pairs
-- Q03: Top counterparty pairs — two INNER JOINs + GROUP BY entity pairs, ranked by total flow
-- Q04: Time-series between specific entities — filtered double JOIN + GROUP BY date
-- Q05: Entity inflow/outflow balance sheet — two CTEs + FULL OUTER JOIN
-- Q06: Category flow matrix — two INNER JOINs on category + GROUP BY
+On TPC-H SF100 (~600M rows) on the same hardware, SiriusDB achieves ~8x speedup over CPU.
 
-These match the query patterns described in Sections 5 and 6 of the TRM brief: large fact table, two dimension joins on the entity map, GROUP BY aggregation across entity pairs.
+## 3. What SiriusDB Supports
 
-## 3. SiriusDB Execution Modes
+Operators used in TRM queries:
+- INNER JOIN, LEFT JOIN, FULL OUTER JOIN
+- GROUP BY with SUM, COUNT, COUNT DISTINCT
+- ORDER BY + LIMIT
+- CTEs
+- CASE WHEN (used as workaround for COALESCE, which is not yet implemented)
 
-SiriusDB offers two GPU execution paths, suited for different deployment scenarios:
+Storage:
+- Reads Parquet natively (predicate pushdown, column pruning)
+- Can also query DuckDB files
 
-### gpu_processing (in-memory cached)
+Current limitations:
+- COALESCE not yet implemented in gpu_execution (CASE WHEN workaround works)
+- VARCHAR join keys work but are slower — integer dictionary keys recommended
 
-- Data is loaded into GPU memory on first query and cached for subsequent queries
-- Best for **interactive serving** where the same tables are queried repeatedly
-- Requires data to fit in GPU memory (24GB on RTX 6000, up to 80GB on A100/H100)
-- Achieves the lowest latency on hot queries (94-173ms on 3-month dataset)
-
-### gpu_execution (out-of-core, Parquet-native)
-
-- Reads directly from Parquet files, transfers to GPU per query
-- Supports datasets larger than GPU memory through tiered memory management (GPU → host → disk)
-- Better for **large-scale analytics** and **ad-hoc queries** on cold data
-- Cold start includes Parquet decode + GPU transfer (~2 seconds), hot runs benefit from caching
-
-For TRM's serving layer use case, `gpu_processing` maps to the StarRocks replacement scenario (pre-loaded data, sub-second queries). `gpu_execution` maps to the ad-hoc analytics scenario (query against Iceberg/Parquet directly).
-
-## 4. Architectural Fit with TRM's Pipeline
-
-### Storage format compatibility
-
-TRM uses Apache Iceberg with Parquet as the storage layer. SiriusDB's `gpu_execution` path reads Parquet natively through DuckDB's Parquet reader, which supports:
-- Predicate pushdown (zone maps, row group filtering)
-- Column pruning (only reads projected columns)
-- Partition pruning (date-partitioned layouts)
-
-This means SiriusDB can query Iceberg tables directly without a separate data loading step, similar to how StarRocks or Trino would connect to Iceberg.
-
-### Join pattern support
-
-The TRM pipeline is join-heavy — every query performs at least two JOINs on the entity address map. SiriusDB supports:
-- **INNER JOIN**: Implemented via `cudf::inner_join` (hash-based)
-- **LEFT JOIN**: Implemented via `cudf::left_join`
-- **FULL OUTER JOIN**: Supported (used in Q05)
-- **Hash join on integer keys**: Optimal for dictionary-encoded address IDs
-
-The dictionary encoding strategy (mapping VARCHAR addresses to INTEGER IDs) is critical for performance. With 4-byte integer keys, GPU hash tables are compact and cache-friendly. We recommend this approach for production deployment.
-
-### Aggregation support
-
-SiriusDB supports the aggregation patterns in the TRM queries:
-- SUM, COUNT, COUNT DISTINCT
-- GROUP BY with multiple columns (date, asset, entity pairs)
-- ORDER BY + LIMIT (top-N)
-- CTEs (Common Table Expressions)
-
-### Current limitations
-
-- **COALESCE**: Not yet natively supported in gpu_execution's expression evaluator. We use `CASE WHEN col IS NOT NULL THEN col ELSE default END` as a workaround, which is semantically identical. Native support is planned.
-- **VARCHAR join keys**: Integer dictionary keys are strongly recommended. VARCHAR joins work but are significantly slower due to string hashing overhead.
-
-## 5. Scaling Considerations
-
-### Where GPU excels
-
-The GPU advantage grows with data size because:
-1. **GPU hash join is O(N) with massive parallelism** — thousands of CUDA cores process the probe table in parallel
-2. **GPU memory bandwidth** (RTX 6000: 672 GB/s) far exceeds CPU memory bandwidth (~100 GB/s DDR4)
-3. **CPU parallel scaling saturates** — DuckDB already uses all 48 cores on a single query; larger data means longer wall time
-
-On TPC-H SF100 (~600M rows), SiriusDB achieves **8x speedup** over CPU. TRM's production datasets (billions of UTXO flows, hundreds of millions of entity mappings) are well into the GPU-favorable range.
-
-### Recommended hardware for TRM scale
-
-| Scale | Flows | GPU | GPU Memory | Expected hot latency |
-|-------|-------|-----|-----------|---------------------|
-| 3 months | ~100M | RTX 6000 | 24GB | <200ms |
-| 1 year | ~400M | A100 / L40S | 48-80GB | <500ms |
-| Multi-year | 1B+ | H100 / GH200 | 80-96GB | <1s |
-
-### Concurrent query throughput
-
-GPU execution uses a stream-per-thread model — multiple queries can execute simultaneously on different CUDA streams. Unlike CPU-based systems where adding concurrent queries degrades single-query latency (thread contention), GPU queries are largely independent. This is relevant for TRM's API serving use case with concurrent dashboard queries.
-
-## 6. Reproducing These Results
-
-All code, data preparation scripts, and benchmark harnesses are in the `sirius-crypto-demo` repository:
+## 4. Reproducing These Results
 
 ```bash
+cd sirius-crypto-demo
+
 # Data preparation
-python scripts/download_eth_transfers.py    # Download from AWS S3
-python scripts/download_mbal.py             # Download MBAL labels
-python scripts/prepare_tables.py            # Build DuckDB + Parquet files
+python scripts/download_eth_transfers.py
+python scripts/download_mbal.py
+python scripts/prepare_tables.py
 
 # Run benchmark
-cd benchmark
-bash run_report_benchmark.sh                # Full CPU + GPU benchmark
+bash benchmark/run_report_benchmark.sh
 ```
 
-The benchmark auto-detects GPU hardware and configures memory allocation. Results are written to `benchmark/results/` as CSV files.
+Results output to `benchmark/results/` as CSV.
 
-## 7. Next Steps
+## 5. Next Steps
 
-We propose the following areas for deeper collaboration:
-
-1. **Scale testing**: Run the pipeline on 1B+ row datasets to demonstrate GPU advantage at production scale. We can generate larger synthetic datasets or use full-year blockchain data.
-
-2. **Iceberg integration**: Test SiriusDB reading directly from Iceberg table metadata (partition pruning, schema evolution). DuckDB has an Iceberg extension that SiriusDB can leverage.
-
-3. **Concurrent query benchmarks**: Simulate TRM's API serving pattern — multiple concurrent queries against the same cached dataset. Measure throughput (queries/second) and tail latency (p99).
-
-4. **COALESCE and CASE WHEN optimization**: Implement native COALESCE support to remove the query rewrite workaround.
-
-5. **Skewed key analysis**: TRM noted that a small number of entities control millions of addresses. We can benchmark skewed join distributions to verify GPU hash join handles this well.
-
-We look forward to discussing these results and planning the next phase of evaluation.
+- Benchmark on larger datasets (1B+ rows)
+- Benchmark on newer GPU hardware (A100, H100, GH200)
+- Benchmark concurrent queries
+- Implement native COALESCE support
