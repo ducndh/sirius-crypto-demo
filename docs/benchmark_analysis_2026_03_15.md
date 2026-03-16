@@ -4,73 +4,75 @@
 
 - **CPU**: 2x Intel Xeon Gold 6126 @ 2.60GHz (24 physical cores, 48 threads)
 - **RAM**: 187GB
-- **GPU**: Quadro RTX 6000 (24GB GDDR6, compute capability 7.5, Turing)
+- **GPU**: Quadro RTX 6000 (24GB GDDR6, Turing, compute capability 7.5)
 - **Driver**: 580.126.20
 
 ## Dataset
 
-Ethereum token transfers with dictionary-encoded integer join keys (V3 DICT):
-- 3-month (Q4 2025): ~117M rows in `address_flows_daily_dict`, ~3.2M rows in `entity_address_map_dict`
-- 6-month (H2 2025): ~228M rows in `address_flows_daily_dict`, ~3.2M rows in `entity_address_map_dict`
-- Parquet files: `bench_flows_dict.parquet` (3mo), `bench_flows_dict_6mo.parquet` (6mo)
-- DuckDB file: `crypto_demo_2025q4.duckdb` (76GB)
+Ethereum token transfers, dictionary-encoded integer join keys (V3 DICT):
+
+| Dataset | Rows (flows) | Entity map rows | In-memory size | Parquet size |
+|---------|---:|---:|---:|---:|
+| 6-month (H2 2025) | 228M | 3.2M | ~3.6GB | ~1.9GB |
+
+The `address_flows_daily_dict` table has 7 columns: `from_addr_id` (int32), `to_addr_id` (int32), `date` (date), `asset_id` (int32, dictionary-encoded token contract address), `amount` (double), `tx_count` (int64). The `asset` VARCHAR column (292K distinct 42-char ERC-20 contract addresses) has been dictionary-encoded to `asset_id`.
+
+Entity coverage is very low: only 0.3% of flows (709K / 228M) have matching entities. DuckDB's optimizer rewrites `LEFT JOIN + HAVING != 'unknown'` → INNER JOIN, so Q02-Q04/Q06 effectively process only 709K rows after the join.
 
 ## Queries
 
-TRM pipeline Q02-Q06. All involve 2x JOIN on integer keys + GROUP BY + aggregation.
-- Q02: Entity flow rollup (LEFT JOIN x2)
-- Q03: Top counterparty pairs (INNER JOIN x2)
-- Q04: Time-series between two entities (INNER JOIN x2, filtered)
-- Q05: Entity inflow/outflow balance (CTE + FULL OUTER JOIN)
-- Q06: Category flow matrix (INNER JOIN x2)
+TRM pipeline Q02–Q06. All involve 2x JOIN on integer keys + GROUP BY + aggregation.
 
-COALESCE in Q02/Q03/Q05/Q06 rewritten to `CASE WHEN ... IS NOT NULL` for gpu_execution (not yet implemented in expression translator).
+| Query | Pattern | Join type after optimization |
+|-------|---------|------------------------------|
+| Q02 | Entity flow rollup (by date + asset_id) | INNER (optimizer rewrites LEFT+HAVING) |
+| Q03 | Top counterparty pairs | INNER |
+| Q04 | Time-series between two entities | INNER + WHERE filter |
+| Q05 | Entity inflow/outflow balance | CTE → FULL OUTER JOIN |
+| Q06 | Category flow matrix | INNER |
 
-## Results
+COALESCE rewritten to `CASE WHEN ... IS NOT NULL` for both gpu_processing and gpu_execution.
 
-### 3-month (Q4 2025, ~117M flows)
+## Results — 228M rows
 
-| Query | CPU (DuckDB file) | CPU (Parquet) | gpu_processing cold | gpu_processing hot | gpu_execution cold | gpu_execution hot |
-|-------|---:|---:|---:|---:|---:|---:|
-| Q02 | 115ms | 259ms | 336ms | 126ms | 2,237ms | 596ms |
-| Q03 | 109ms | 176ms | 257ms | 127ms | 2,017ms | 313ms |
-| Q04 | 76ms | 146ms | 224ms | 94ms | 1,973ms | 323ms |
-| Q05 | 145ms | 313ms | 344ms | 173ms | 2,207ms | 596ms |
-| Q06 | 98ms | 178ms | 276ms | 119ms | 1,965ms | 314ms |
+### gpu_processing (data cached in GPU memory, `gpu_buffer_init('10 GB', '10 GB')`)
 
-### 6-month (H2 2025, ~228M flows)
+| Query | CPU warm | GPU warm | Speedup |
+|-------|---:|---:|---:|
+| Q02 | 106ms | 43ms | **2.5x** |
+| Q03 | 93ms | 38ms | **2.4x** |
+| Q04 | 62ms | 28ms | **2.2x** |
+| Q05 | 207ms | 80ms | **2.6x** |
+| Q06 | 100ms | 38ms | **2.6x** |
 
-| Query | CPU (DuckDB file) | CPU (Parquet) | gpu_execution cold | gpu_execution hot |
-|-------|---:|---:|---:|---:|
-| Q02 | 109ms | 414ms | 2,731ms | 1,090ms |
-| Q03 | 94ms | 248ms | 2,187ms | 547ms |
-| Q04 | 74ms | 226ms | 2,188ms | 566ms |
-| Q05 | 146ms | 494ms | 2,671ms | 999ms |
-| Q06 | 94ms | 261ms | 2,326ms | 546ms |
+Q02 previously fell back due to VARCHAR `asset` in GROUP BY. Dictionary-encoding to `asset_id` (int32) fixed this — Q02 now runs fully on GPU.
 
-`gpu_processing` not benchmarked on 6-month — dataset exceeds 9GB+9GB GPU memory config.
+Q05 previously fell back due to FULL OUTER JOIN. Implemented `cudf::hash_join::full_join` route in gpu_processing — Q05 now runs fully on GPU at 80ms (2.6x speedup).
 
-### Reference: TPC-H SF100 on same hardware
+### gpu_execution with `table_gpu` cache
 
-On TPC-H SF100 (~600M rows), Sirius achieves ~8x speedup over CPU (21/22 queries pass).
+Setting `scan_cache_level = 'table_gpu'` keeps decoded tables in GPU memory across queries, similar to gpu_processing's `gpu_buffer_init`.
 
-## Bug Fixes Applied
+| Query | CPU warm | gpu_execution warm (no cache) | gpu_execution warm (table_gpu) |
+|-------|---:|---:|---:|
+| Q02 | 106ms | 1,129ms | 777ms |
+| Q03 | 93ms | 545ms | **121ms** |
+| Q04 | 62ms | 567ms | **121ms** |
+| Q05 | 199ms | 1,010ms | 223ms |
+| Q06 | 100ms | 546ms | **141ms** |
 
-Benchmark ran on `local/all-fixes` branch with two crash fixes:
+With `table_gpu` cache, Q03/Q04/Q06 drop from ~550ms to ~121-141ms — a 4x improvement from caching alone. The remaining gap vs gpu_processing (121ms vs 38ms) is pipeline coordination overhead.
 
-1. **TABLE_SCAN filter crash** (`fix/table-scan-filter-crash`): OOB access when optimizer eliminates an always-true WHERE filter. Previously SIGSEGV on `WHERE f.date >= '2025-10-01'` queries.
-
-2. **LEFT JOIN materialize crash** (`fix/left-join-groupby-crash`): Null handling in GPU materialize kernels. Previously SIGSEGV on LEFT JOIN + GROUP BY.
+Q02 and Q05 still show higher times (~777ms, ~223-1062ms) because their more complex plans (LEFT JOIN, FULL OUTER JOIN) incur more pipeline overhead.
 
 ## Measurement Methodology
 
-- **CPU (DuckDB file)**: Single DuckDB session, warmup + measured run with `.timer on` against `crypto_demo_2025q4.duckdb`.
-- **CPU (Parquet)**: Single DuckDB session, warmup + measured run with `.timer on` against parquet files via `read_parquet()`.
-- **gpu_processing**: Single session, `gpu_buffer_init('9 GB', '9 GB')`, cold + hot with `.timer on`.
-- **gpu_execution**: Single session, parquet views, cold + hot with `.timer on`. Config: `sirius_rtx6000.cfg`.
+- **CPU**: Single DuckDB session against `crypto_demo_2025q4.duckdb`, warmup + measured run, `.timer on`.
+- **gpu_processing**: Single session, `gpu_buffer_init('10 GB', '10 GB')`, `~/.sirius/sirius.cfg` moved aside, cold + hot, `.timer on`. Session logs checked for "fallback to DuckDB".
+- **gpu_execution**: Single DuckDB session with `-unsigned`, parquet views, `SET scan_cache_level = 'table_gpu'`, cold + warm runs, `.timer on`. Config: `sirius_rtx6000.cfg`.
 
-## Open Questions
+## Data Pipeline
 
-- How do these numbers change on stronger GPU hardware (A100, H100, GH200)?
-- At what dataset size does GPU start winning on this hardware?
-- Would concurrent query benchmarks show different results?
+Raw `token_transfers` (528M rows, 11 columns) → pre-aggregated `address_flows_daily_dict` (228M rows, 7 columns). The aggregation groups by `(from_addr_id, to_addr_id, date, asset_id)` and sums `amount`/`tx_count`. Dropped columns: `transaction_hash`, `log_index`, `block_number`, `block_hash`, `block_timestamp`, `last_modified`.
+
+Dictionary tables: `address_dictionary` (address → addr_id), `asset_dictionary` (token address → asset_id).

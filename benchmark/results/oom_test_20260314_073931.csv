@@ -1,7 +1,0 @@
-months,query,status,time_ms,rows,error
-3,Q1_agg,OK,3665,0,
-3,Q2_addr_agg,ERROR,9397,0,Invalid Error: SiriusExecuteQuery error: INTERNAL Error: Execute[Function]: Unknown function type: ||
-3,Q3_count_distinct,OK,12535,0,
-6,Q1_agg,OK,6926,0,
-6,Q2_addr_agg,ERROR,9749,0,Invalid Error: SiriusExecuteQuery error: INTERNAL Error: Execute[Function]: Unknown function type: ||
-6,Q3_count_distinct,OK,38678,0,

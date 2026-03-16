@@ -1,5 +1,0 @@
-dataset,query,engine,run_type,time_ms
-1mo,Q01,cpu,run,3257
-1mo,Q02_V1,cpu,run,854
-1mo,Q03_V1,cpu,run,466
-1mo,Q04_V1,cpu,run,373
