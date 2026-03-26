@@ -20,6 +20,11 @@ CREATE OR REPLACE VIEW v_flows AS
 CREATE OR REPLACE VIEW v_entity_map AS
     SELECT * FROM entity_address_map_dict;
 
+-- Integer entity map (for GPU queries — no VARCHAR joins)
+-- Required columns: entity_id BIGINT, addr_id INT
+CREATE OR REPLACE VIEW v_emap AS
+    SELECT entity_id, addr_id FROM entity_address_map_int;
+
 -- Edge table for multi-hop graph queries (derived from flows)
 -- Required columns: src INT, dst INT
 CREATE OR REPLACE VIEW v_edges AS

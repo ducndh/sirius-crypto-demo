@@ -19,3 +19,7 @@ starrocks/data/
 # Runtime logs
 log/
 cufile.log
+
+# Stale DuckDB files in repo root
+*.duckdb
+*.duckdb.wal
