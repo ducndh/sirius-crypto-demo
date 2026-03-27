@@ -71,26 +71,17 @@ cause GPU fallback or ~100x slowdown.
 
 ### RTX 6000 (24 GB Turing, 2x Xeon Gold 6126)
 
-**Dataset:** 228M rows, 6-month Ethereum flows (dictionary-encoded)
-**Mode:** gpu_processing, warm cache, `gpu_buffer_init('10 GB', '10 GB')`
-
-| Query | CPU (ms) | GPU (ms) | Speedup |
-|-------|---:|---:|---:|
-| Q02 | 106 | 43 | **2.5x** |
-| Q03 | 93 | 38 | **2.4x** |
-| Q04 | 62 | 28 | **2.2x** |
-| Q05 | 207 | 80 | **2.6x** |
-| Q06 | 100 | 38 | **2.6x** |
+**Mode:** gpu_processing, warm cache, `gpu_buffer_init('12 GB', '8 GB')`
 
 Scaling (3mo-12mo, correctness-validated):
 
-| Slice | Rows | Speedup range |
-|-------|-----:|:---:|
-| 3 mo | 63M | 3.8-6.0x |
-| 6 mo | 126M | 4.8-6.2x |
-| 9 mo | 190M | 4.4-6.4x |
-| 12 mo | 255M | 3.5-7.1x |
-| 15 mo | 320M | OOM (8 GB work pool) |
+| Slice | Rows | GPU range | CPU range | Speedup range |
+|-------|-----:|----------:|----------:|:---:|
+| 3 mo | 63M | 5-33 ms | 27-197 ms | 3.8-6.0x |
+| 6 mo | 126M | 7-38 ms | 39-190 ms | 4.8-6.2x |
+| 9 mo | 190M | 9-44 ms | 52-197 ms | 4.4-6.4x |
+| 12 mo | 255M | 11-48 ms | 48-228 ms | 3.5-7.1x |
+| 15 mo | 320M | OOM (8 GB work pool) | — | — |
 
 ### A100 (40 GB Ampere SXM4)
 

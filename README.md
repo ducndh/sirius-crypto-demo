@@ -104,15 +104,14 @@ Results are written to `benchmark/results/`.
 
 ### RTX 6000 (24 GB, Turing) — gpu_processing, warm cache
 
-228M-row dataset (6-month Ethereum flows, dictionary-encoded):
+Scaling across data sizes (Sankey + Q02-Q06, correctness-validated):
 
-| Query | CPU | GPU | Speedup |
-|-------|----:|----:|--------:|
-| Q02 Entity rollup | 106 ms | 43 ms | **2.5x** |
-| Q03 Top pairs | 93 ms | 38 ms | **2.4x** |
-| Q04 Timeseries | 62 ms | 28 ms | **2.2x** |
-| Q05 Inflow/outflow | 207 ms | 80 ms | **2.6x** |
-| Q06 Category matrix | 100 ms | 38 ms | **2.6x** |
+| Data | Rows | GPU range | CPU range | Speedup |
+|------|-----:|----------:|----------:|--------:|
+| 3 mo | 63M | 5-33 ms | 27-197 ms | 3.8-6.0x |
+| 6 mo | 126M | 7-38 ms | 39-190 ms | 4.8-6.2x |
+| 9 mo | 190M | 9-44 ms | 52-197 ms | 4.4-6.4x |
+| 12 mo | 255M | 11-48 ms | 48-228 ms | 3.5-7.1x |
 
 ### A100 (40 GB, Ampere) — gpu_processing, warm cache
 
