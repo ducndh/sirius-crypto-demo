@@ -2,6 +2,16 @@
 # Validated scaling benchmark: physical tables at each size, result comparison
 # Creates separate DuckDB files per date range, benchmarks GPU vs CPU,
 # compares outputs to catch silent fallback.
+#
+# Requirements:
+#   - Sirius built on feature/union-all-gpu-processing branch (or dev with UNION ALL cherry-pick)
+#   - ENABLE_LEGACY_SIRIUS=ON in CMake
+#   - ~/.sirius/sirius.cfg moved aside (script does this automatically)
+#   - Source DB at /tmp/crypto_slim.duckdb with address_flows_daily_dict + entity_address_map_int
+#
+# Known workarounds baked into queries:
+#   - CAST(SUM(...) AS DOUBLE) — avoids DECIMAL bug in gpu_physical_result_collector
+#   - CASE WHEN instead of COALESCE — COALESCE not implemented in gpu_processing
 set -uo pipefail
 
 SIRIUS_DIR="${SIRIUS_DIR:-$HOME/sirius-dev}"
