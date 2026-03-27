@@ -139,13 +139,31 @@ address strings with 4-byte INT32 dictionary IDs reduced GPU query time from
 seconds to milliseconds. GPU hash join performance is dominated by key width —
 narrower keys mean higher throughput on memory-bandwidth-bound operations.
 
+Our benchmark uses a 3.2M-row entity map. TRM's production map may be
+significantly larger (tens of millions of rows). The hash join builds on the
+entity map (smaller side) and probes from the flow table — so a larger entity
+map increases the hash table size but should not change the probe-side
+throughput. That said, we have not yet tested with build-side tables at the
+50M+ scale. As the hash table grows, factors like hash slot contention and
+GPU memory pressure could become relevant. We would want to run benchmarks
+at TRM's actual entity map scale to confirm performance holds.
+
 > **How does SiriusDB behave with skewed join keys?**
 
 The TRM workload is inherently skewed — a few entities (exchanges like Binance,
 Coinbase) control millions of addresses while most entities have fewer than 100.
-We observed consistent GPU speedups across all data slices (3 months to 24
-months) despite this skew. The benchmark results in Section 2 reflect this real
-skewed distribution — they are not synthetic uniform data.
+Our benchmark uses real MBAL label data which reflects this skew, and we
+observed consistent GPU speedups across all data slices (3 months to 24 months).
+
+The TRM join pattern is many-to-one (each flow row matches at most one entity),
+so skewed keys do not cause fan-out on the output side. The probe is per-row
+from the flow table, so work distribution across GPU threads is determined by
+the flow table size, not by which entity a row happens to match. In principle,
+hash slot contention on hot buckets could serialize some probe threads, but with
+well-distributed INT32 keys and a reasonably sized hash table, this effect
+should be small. Our results so far are consistent with this, though we
+acknowledge the entity map in our benchmark is smaller than TRM's production
+scale.
 
 > **Are there query patterns where SiriusDB's architecture offers a structural advantage?**
 
