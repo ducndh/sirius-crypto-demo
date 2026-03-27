@@ -1,180 +1,148 @@
-# sirius-crypto-demo
+# Sirius Crypto Demo
 
-End-to-end benchmark for [Sirius](https://github.com/sirius-db/sirius) GPU analytics
-on blockchain data — targeting the TRM Labs counterparty flow workload.
+GPU-accelerated blockchain counterparty flow analytics using
+[Sirius](https://github.com/sirius-db/sirius), benchmarked against the
+TRM Labs workload (entity flow rollup, multi-hop Sankey trace).
 
-## Repository Structure
+## Repository Layout
 
 ```
-├── data/
-│   ├── eth_transfers/           # Ethereum token transfers (AWS, Parquet)
-│   ├── mbal/                    # MBAL 10M address labels (Kaggle)
-│   ├── bench_*.parquet          # Exported benchmark parquets (auto-generated)
-│   └── crypto_demo_*.duckdb    # Built DuckDB database (auto-generated)
-├── queries/trm_pipeline/        # TRM entity flow queries (Q01-Q06)
-├── benchmark/
-│   ├── run_benchmark.sh         # Main benchmark script (all engines)
-│   └── results/                 # CSV outputs per GPU
-├── scripts/
-│   ├── download_eth_transfers.py
-│   ├── download_mbal.py
-│   └── prepare_tables.py
-└── docs/                        # Analysis documents
+queries/trm_pipeline/       SQL queries (Q01-Q06 + multi-hop Sankey)
+  setup_views.sql            Pluggable data-source views (swap DuckDB/Parquet/Iceberg)
+  q_sankey_multihop.sql      3-hop entity flow trace (main demo query)
+  q01-q06                    TRM counterparty flow pipeline queries
+
+scripts/
+  download_eth_transfers.py  Download Ethereum token transfers from AWS S3
+  download_mbal.py           Download MBAL 10M address labels from Kaggle
+  prepare_tables.py          Build DuckDB database with dictionary-encoded tables
+  generate_2yr_data.py       Build full 2-year database (Jan 2024 – Mar 2026)
+  scaling_validated.sh       Run GPU vs CPU scaling benchmark across data slices
+  bench_trm.py               Quick Sankey benchmark (warm-cache timing)
+  machines.env               Machine-specific config template
+
+benchmark/
+  bench_multihop.sh          Multi-hop trace benchmark script
+  sirius.cfg                 Reference Sirius GPU config (A100, 40GB)
+  results/                   Validated benchmark results (RTX 6000 + A100)
+
+docs/                        Technical analysis and reports
 ```
-
-## The TRM Pipeline
-
-The core workload is **blockchain counterparty flow analytics**:
-
-1. **Stage 1** (batch): Aggregate raw token transfers to daily address flows
-2. **Stage 2** (interactive): Join with entity map + roll up to entity-level flows
-
-We benchmark **both stages** — Q01 covers Stage 1 (heavy aggregation on raw data),
-Q02-Q06 cover Stage 2 (join-heavy entity analytics).
-
-### Queries Benchmarked
-
-| Query | Stage | Description | Pattern |
-|-------|-------|-------------|---------|
-| Q01 | 1 | Daily address flow aggregation | GROUP BY on raw token_transfers |
-| Q02 | 2 | Entity flow rollup | 2x LEFT JOIN + GROUP BY + ORDER + LIMIT |
-| Q03 | 2 | Top counterparty pairs | 2x INNER JOIN + GROUP BY + ORDER |
-| Q04 | 2 | Entity timeseries | 2x INNER JOIN + WHERE + GROUP BY + ORDER |
-| Q05 | 2 | Entity inflow/outflow | CTE + FULL OUTER JOIN |
-| Q06 | 2 | Category flow matrix | 2x INNER JOIN + GROUP BY + ORDER |
-
-### Address Matching Strategies
-
-| Version | Join Key | Pros | Cons |
-|---------|----------|------|------|
-| **V1 VARCHAR** | 42-char hex address | Exact, no prep | Slow string hashing |
-| **V3 DICT** | INT32 dictionary ID | Fast integer join | Requires dictionary build step |
-
-V2 (INT64 hash) was dropped — hash collisions confirmed across engines and no speed advantage over V3.
 
 ## Quick Start
 
-### 1. Prerequisites
+### Prerequisites
 
-- Sirius built at `~/sirius-dev` (DuckDB 1.4.4 extension)
-- NVIDIA GPU with driver 565+ (CUDA 12.8+)
-- AWS CLI (`pip install awscli`)
-- ~100GB disk space for data
+- **Sirius** built from source (see [build instructions](https://github.com/sirius-db/sirius))
+- NVIDIA GPU with CUDA 12.8+ driver (565+)
+- AWS CLI (`pip install awscli` — no credentials needed)
+- Kaggle CLI (`pip install kaggle` + [API token](https://www.kaggle.com/docs/api))
 
-### 2. Download Data
+> **Build tip:** Set `-DCUDA_ARCHS=XX` to your GPU's compute capability for
+> faster builds (e.g., `86` for A5000, `80` for A100, `75` for RTX 6000).
+
+### 1. Download data
 
 ```bash
-# MBAL entity labels (requires Kaggle token)
+# Ethereum token transfers — 3 months (~25 GB) for a quick test
+python scripts/download_eth_transfers.py --start-date 2024-10-01 --end-date 2024-12-31
+
+# MBAL entity address labels (~1 GB)
 python scripts/download_mbal.py
-
-# Ethereum token transfers (2025, ~365 days, ~100GB raw)
-python scripts/download_eth_transfers.py --start-date 2025-01-01 --end-date 2025-12-31
 ```
 
-### 3. Build Database
+### 2. Build the database
 
 ```bash
-python scripts/prepare_tables.py --year 2025
+# 3-month database (~2 GB)
+python scripts/prepare_tables.py --year 2024
 ```
 
-This creates:
-- `data/crypto_demo_2025.duckdb` — DuckDB database with all tables
-- `data/bench_*.parquet` — Parquet exports for `gpu_execution` path
-- Dictionary-encoded tables for V3 DICT benchmarks
+This creates `data/crypto_demo_2024.duckdb` with:
+- `token_transfers` — raw Ethereum transfers
+- `address_flows_daily` / `address_flows_daily_dict` — daily aggregated flows
+- `entity_address_map` / `entity_address_map_dict` — MBAL labels
+- `address_dictionary` — address VARCHAR → INT32 mapping
+- Parquet exports in `data/bench_*.parquet` for `gpu_execution` path
 
-### 4. Run Benchmarks
+For the full **2-year database** (770M rows, ~17 GB), see [docs/data_guide.md](docs/data_guide.md).
+
+### 3. Run queries
 
 ```bash
-# Full benchmark (CPU + gpu_processing + gpu_execution)
-bash benchmark/run_benchmark.sh
+SIRIUS=~/sirius-dev/build/release/duckdb
+PIXI_ENV=~/sirius-dev/.pixi/envs/cuda12
+DB=data/crypto_demo_2024.duckdb
 
-# With custom settings
-bash benchmark/run_benchmark.sh \
-    --sirius-dir ~/sirius-dev \
-    --gpu-mem 24 \
-    --runs 5
+# Set up LD_LIBRARY_PATH for CUDA
+export LD_LIBRARY_PATH=$PIXI_ENV/lib:$LD_LIBRARY_PATH
+
+# CPU baseline
+$SIRIUS $DB -c ".read queries/trm_pipeline/setup_views.sql" \
+            -c ".timer on" \
+            -c ".read queries/trm_pipeline/q_sankey_multihop.sql"
+
+# GPU (gpu_processing) — move ~/.sirius/sirius.cfg aside first
+mv ~/.sirius/sirius.cfg ~/.sirius/sirius.cfg.bak 2>/dev/null
+$SIRIUS $DB -c ".read queries/trm_pipeline/setup_views.sql" \
+            -c "CALL gpu_buffer_init('10 GB', '10 GB');" \
+            -c ".timer on" \
+            -c "CALL gpu_processing('.read queries/trm_pipeline/q_sankey_multihop.sql');"
+mv ~/.sirius/sirius.cfg.bak ~/.sirius/sirius.cfg 2>/dev/null
 ```
 
-Results are saved to `benchmark/results/benchmark_<GPU>_<timestamp>.csv`.
-
-## Running on Different GPUs
-
-The benchmark auto-detects GPU and generates an appropriate config file.
-
-### RTX 6000 (24GB VRAM)
+### 4. Run the scaling benchmark
 
 ```bash
-bash benchmark/run_benchmark.sh --gpu-mem 24
+# Runs GPU vs CPU across 3-month to 12-month slices, validates correctness
+bash scripts/scaling_validated.sh
 ```
 
-### L40S (48GB VRAM)
+Results are written to `benchmark/results/`.
 
-```bash
-bash benchmark/run_benchmark.sh --gpu-mem 48
-```
+## Benchmark Results
 
-### GH200 (96GB HBM3)
+### RTX 6000 (24 GB, Turing) — gpu_processing, warm cache
 
-```bash
-# GH200 has unified memory — can use more aggressively
-bash benchmark/run_benchmark.sh --gpu-mem 96
-```
+228M-row dataset (6-month Ethereum flows, dictionary-encoded):
 
-### Benchmark Script Options
+| Query | CPU | GPU | Speedup |
+|-------|----:|----:|--------:|
+| Q02 Entity rollup | 106 ms | 43 ms | **2.5x** |
+| Q03 Top pairs | 93 ms | 38 ms | **2.4x** |
+| Q04 Timeseries | 62 ms | 28 ms | **2.2x** |
+| Q05 Inflow/outflow | 207 ms | 80 ms | **2.6x** |
+| Q06 Category matrix | 100 ms | 38 ms | **2.6x** |
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--sirius-dir` | `~/sirius-dev` | Path to Sirius build directory |
-| `--data-dir` | `./data` | Path to data directory |
-| `--gpu-mem` | auto-detect | GPU memory in GB |
-| `--pixi-env` | `cuda12` | Pixi environment name |
-| `--runs` | `3` | Number of benchmark iterations |
+### A100 (40 GB, Ampere) — gpu_processing, warm cache
 
-### Environment Variables
+Scaling across data sizes (3-hop Sankey + Q02-Q06):
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SIRIUS_DIR` | `~/sirius-dev` | Override Sirius directory |
-| `DATA_DIR` | `./data` | Override data directory |
-| `GPU_MEM_GB` | auto | Override GPU memory detection |
+| Data | Rows | GPU range | CPU range | Speedup |
+|------|-----:|----------:|----------:|--------:|
+| 3 mo | 63M | 5-24 ms | 20-93 ms | 2.9-5.4x |
+| 6 mo | 126M | 6-24 ms | 25-118 ms | 3.0-6.0x |
+| 12 mo | 255M | 8-31 ms | 32-170 ms | 3.1-5.5x |
+| 21 mo | 503M | 11-42 ms | 45-166 ms | 3.6-7.8x |
+| 24 mo | 619M | 12-46 ms | 42-173 ms | 3.4-3.8x |
 
-## Architecture Notes
+GPU memory limit: ~620M rows on 40 GB A100 (working pool exhaustion).
 
-### Two GPU Execution Paths
+## GPU Execution Notes
 
-| Path | Entry Point | Data Source | Caching | Out-of-Core |
-|------|-------------|-------------|---------|-------------|
-| `gpu_processing` | `CALL gpu_processing(...)` | DuckDB tables | GPU buffer manager | No |
-| `gpu_execution` | `CALL gpu_execution(...)` | Parquet views | cucascade tiered memory | Yes |
-
-**`gpu_processing`** is the stable path — fastest warm performance (data cached in GPU memory).
-Use for datasets that fit in VRAM.
-
-**`gpu_execution`** is the new path — supports out-of-core via cucascade (GPU → host → disk tiering).
-Use for datasets larger than VRAM. Warm performance is ~8x slower than `gpu_processing` on same data,
-but handles arbitrarily large datasets.
-
-### CUDA Driver Requirements
-
-The `gpu_execution` path uses `cudaMemcpyBatchAsync` (CUDA 12.8+). Requires:
-- **NVIDIA driver 565+** (CUDA 12.8 support)
-- pixi `cuda12` env provides toolkit 12.9 for compilation
-
-Older drivers (560, CUDA 12.6) will fail with `cudaErrorCallRequiresNewerDriver`.
+- **gpu_processing**: Data cached in GPU VRAM. Fastest warm performance. Use
+  when dataset fits in GPU memory.
+- **gpu_execution**: Out-of-core via cucascade (GPU→host→disk tiering). Use for
+  datasets larger than VRAM. Requires `~/.sirius/sirius.cfg`.
+- Dictionary encoding (V3 DICT) is required for GPU — VARCHAR join keys and
+  GROUP BY columns cause fallback or extreme slowdown.
+- `COALESCE` must be rewritten as `CASE WHEN ... IS NOT NULL THEN ... ELSE ... END`.
+- `DISTINCT` must be rewritten as `GROUP BY` with dummy aggregate.
+- `UNION ALL` requires the `feature/union-all-gpu-processing` branch.
 
 ## Data Sources
 
-| Dataset | Source | Size | Description |
-|---------|--------|------|-------------|
-| Ethereum token transfers | [AWS Public Blockchain](https://registry.opendata.aws/aws-public-blockchain/) | ~300MB/day | Parquet, partitioned by date |
-| MBAL address labels | [Kaggle](https://www.kaggle.com/datasets/yidongchaintoolai/mbal-10m-crypto-address-label-dataset) | ~1GB | 10M labeled crypto addresses |
-
-## Benchmark Results (RTX 6000, 1-week slice)
-
-| Engine | Q02 V3 DICT (warm) |
-|--------|-------------------|
-| DuckDB CPU | 273ms |
-| Sirius `gpu_processing` | **19ms** (14x faster) |
-| Sirius `gpu_execution` | **150ms** (1.8x faster) |
-
-Full results across all queries and data sizes generated by `run_benchmark.sh`.
+| Dataset | Source | Notes |
+|---------|--------|-------|
+| Ethereum token transfers | [AWS Public Blockchain](https://registry.opendata.aws/aws-public-blockchain/) | ~300 MB/day, Parquet, no credentials |
+| MBAL address labels | [Kaggle](https://www.kaggle.com/datasets/yidongchaintoolai/mbal-10m-crypto-address-label-dataset) | 10M addresses, requires Kaggle token |
