@@ -145,8 +145,13 @@ tables, Parquet files, or Iceberg) requires changing one file
 % ============================================================================
 
 All results below use the \texttt{gpu\_processing} path, which caches table
-data in GPU VRAM for interactive query serving. This is SiriusDB's mature
-execution path.
+data in GPU VRAM for interactive query serving.\footnote{All GPU timings
+report \textbf{warm-cache} performance: table data is resident in GPU memory
+before the timed query executes. This matches the expected deployment model
+where SiriusDB serves as an analytical layer over pre-loaded transaction data.
+Cold-start (first query after data load) adds a one-time transfer cost
+proportional to table size; subsequent queries on the same tables pay no
+transfer penalty.} This is SiriusDB's mature execution path.
 
 We are actively developing a second path (\texttt{gpu\_execution}) that reads
 directly from Parquet/Iceberg and supports datasets larger than GPU memory via
@@ -403,8 +408,20 @@ hardware representative of TRM's serving environment.
 
 \textbf{Dictionary encoding is the key optimization.} Replacing 42-byte VARCHAR
 address strings with 4-byte INT32 dictionary IDs reduced GPU query time from
-seconds to milliseconds. GPU hash join performance is dominated by key width ---
-narrower keys mean higher throughput on memory-bandwidth-bound operations.
+seconds to milliseconds.\footnote{On the RTX 6000 (228M rows), Q02 with
+VARCHAR \texttt{asset} column took $\sim$3.3\,s on GPU (memory spilling) vs
+43\,ms with integer \texttt{asset\_id} --- a $\sim$75$\times$ difference. This
+is a one-time ETL normalization step (standard in data warehouse design), not a
+query-time cost. The dictionary tables add negligible storage overhead (322
+entities $\times$ 2 columns = $<$10\,KB).} GPU hash join performance is
+dominated by key width --- narrower keys mean higher throughput on
+memory-bandwidth-bound operations.\footnote{VARCHAR hash joins are not
+currently accelerated on GPU. Queries with string-typed join keys fall back to
+CPU execution transparently. This is a fundamental constraint of the current
+cuDF-based join implementation: GPU hash tables require fixed-width keys for
+efficient parallel probing. Integer dictionary encoding eliminates this
+limitation and also reduces memory footprint by 10$\times$, allowing larger
+datasets to fit in GPU VRAM.}
 
 Our benchmark uses a 3.2M-row entity map. TRM's production map may be
 significantly larger (tens of millions of rows). The hash join builds on the
